@@ -8,6 +8,9 @@ use thiserror::Error;
 use tokio::process::Command;
 
 type CommandResult<T> = Result<T, AppError>;
+const DEFAULT_HISTORY_LIMIT: u32 = 250;
+const MIN_HISTORY_LIMIT: u32 = 50;
+const MAX_HISTORY_LIMIT: u32 = 2_000;
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -149,6 +152,14 @@ struct FileChange {
     rename_score: Option<i32>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitFile {
+    path: String,
+    old_path: Option<String>,
+    status: FileStatus,
+}
+
 #[derive(Debug, Serialize, Clone, Copy)]
 #[serde(rename_all = "kebab-case")]
 enum FileStatus {
@@ -205,13 +216,17 @@ struct BranchCreateRequest {
 }
 
 #[tauri::command]
-async fn repo_open(path: String) -> CommandResult<RepoSnapshot> {
+async fn repo_open(path: String, history_limit: Option<u32>) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&path).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, history_limit).await
 }
 
 #[tauri::command]
-async fn repo_clone(url: String, destination: String) -> CommandResult<RepoSnapshot> {
+async fn repo_clone(
+    url: String,
+    destination: String,
+    history_limit: Option<u32>,
+) -> CommandResult<RepoSnapshot> {
     if url.trim().is_empty() {
         return invalid("INVALID_URL", "Clone URL is required.");
     }
@@ -220,13 +235,13 @@ async fn repo_clone(url: String, destination: String) -> CommandResult<RepoSnaps
     }
 
     run_git(None, vec!["clone".into(), url, destination.clone()]).await?;
-    repo_open(destination).await
+    repo_open(destination, history_limit).await
 }
 
 #[tauri::command]
-async fn repo_status(repo_path: String) -> CommandResult<RepoSnapshot> {
+async fn repo_status(repo_path: String, history_limit: Option<u32>) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, history_limit).await
 }
 
 #[tauri::command]
@@ -236,7 +251,7 @@ async fn git_stage(repo_path: String, paths: Vec<String>) -> CommandResult<RepoS
     let mut args = vec!["add".into(), "--".into()];
     args.extend(safe_paths);
     run_git(Some(&repo), args).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
@@ -246,7 +261,7 @@ async fn git_unstage(repo_path: String, paths: Vec<String>) -> CommandResult<Rep
     let mut args = vec!["restore".into(), "--staged".into(), "--".into()];
     args.extend(safe_paths);
     run_git(Some(&repo), args).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
@@ -256,11 +271,15 @@ async fn git_discard(repo_path: String, paths: Vec<String>) -> CommandResult<Rep
     let mut args = vec!["restore".into(), "--".into()];
     args.extend(safe_paths);
     run_git(Some(&repo), args).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
-async fn git_commit(repo_path: String, message: String, amend: bool) -> CommandResult<RepoSnapshot> {
+async fn git_commit(
+    repo_path: String,
+    message: String,
+    amend: bool,
+) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     if message.trim().is_empty() {
         return invalid("INVALID_COMMIT_MESSAGE", "Commit message is required.");
@@ -272,7 +291,7 @@ async fn git_commit(repo_path: String, message: String, amend: bool) -> CommandR
     }
     args.extend(["-m".into(), message]);
     run_git(Some(&repo), args).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
@@ -283,7 +302,7 @@ async fn git_branch_create(request: BranchCreateRequest) -> CommandResult<RepoSn
     if request.checkout {
         run_git(Some(&repo), vec!["checkout".into(), request.name]).await?;
     }
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
@@ -291,16 +310,20 @@ async fn git_branch_checkout(repo_path: String, name: String) -> CommandResult<R
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&name, "branch name")?;
     run_git(Some(&repo), vec!["checkout".into(), name]).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
-async fn git_branch_delete(repo_path: String, name: String, force: bool) -> CommandResult<RepoSnapshot> {
+async fn git_branch_delete(
+    repo_path: String,
+    name: String,
+    force: bool,
+) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&name, "branch name")?;
     let delete_arg = if force { "-D" } else { "-d" };
     run_git(Some(&repo), vec!["branch".into(), delete_arg.into(), name]).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
@@ -312,14 +335,14 @@ async fn git_fetch(repo_path: String, remote: Option<String>) -> CommandResult<R
         args.push(remote_name);
     }
     run_git(Some(&repo), args).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
 async fn git_pull(repo_path: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     run_git(Some(&repo), vec!["pull".into()]).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
@@ -328,11 +351,15 @@ async fn git_push(
     remote: Option<String>,
     branch: Option<String>,
     force_with_lease: bool,
+    set_upstream: bool,
 ) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     let mut args = vec!["push".into()];
     if force_with_lease {
         args.push("--force-with-lease".into());
+    }
+    if set_upstream {
+        args.push("-u".into());
     }
     if let Some(remote_name) = remote.filter(|value| !value.trim().is_empty()) {
         validate_ref_arg(&remote_name, "remote name")?;
@@ -343,7 +370,20 @@ async fn git_push(
         args.push(branch_name);
     }
     run_git(Some(&repo), args).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_remote_add(
+    repo_path: String,
+    name: String,
+    url: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&name, "remote name")?;
+    validate_remote_url(&url)?;
+    run_git(Some(&repo), vec!["remote".into(), "add".into(), name, url]).await?;
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
@@ -354,7 +394,7 @@ async fn git_stash_push(repo_path: String, message: String) -> CommandResult<Rep
         args.extend(["-m".into(), message]);
     }
     run_git(Some(&repo), args).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
@@ -362,7 +402,7 @@ async fn git_stash_apply(repo_path: String, stash: String) -> CommandResult<Repo
     let repo = resolve_repo_root(&repo_path).await?;
     validate_stash_ref(&stash)?;
     run_git(Some(&repo), vec!["stash".into(), "apply".into(), stash]).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
@@ -370,7 +410,7 @@ async fn git_stash_drop(repo_path: String, stash: String) -> CommandResult<RepoS
     let repo = resolve_repo_root(&repo_path).await?;
     validate_stash_ref(&stash)?;
     run_git(Some(&repo), vec!["stash".into(), "drop".into(), stash]).await?;
-    build_snapshot(&repo).await
+    build_snapshot(&repo, None).await
 }
 
 #[tauri::command]
@@ -386,7 +426,57 @@ async fn git_diff(repo_path: String, path: String, staged: bool) -> CommandResul
     run_git(Some(&repo), args).await
 }
 
-async fn build_snapshot(repo: &Path) -> CommandResult<RepoSnapshot> {
+#[tauri::command]
+async fn git_commit_files(repo_path: String, sha: String) -> CommandResult<Vec<CommitFile>> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&sha, "commit")?;
+    let base = commit_base_ref(&repo, &sha).await?;
+    let output = run_git(
+        Some(&repo),
+        vec![
+            "diff".into(),
+            "--name-status".into(),
+            "-z".into(),
+            "-M".into(),
+            base,
+            sha,
+        ],
+    )
+    .await?;
+
+    Ok(parse_commit_files(&output))
+}
+
+#[tauri::command]
+async fn git_commit_file_diff(
+    repo_path: String,
+    sha: String,
+    path: String,
+    old_path: Option<String>,
+) -> CommandResult<String> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&sha, "commit")?;
+    let base = commit_base_ref(&repo, &sha).await?;
+    let mut safe_paths = validate_file_paths(&[path])?;
+    if let Some(old_path_value) = old_path {
+        let mut old_safe_paths = validate_file_paths(&[old_path_value])?;
+        safe_paths.splice(0..0, old_safe_paths.drain(..));
+    }
+
+    let mut args = vec![
+        "diff".into(),
+        "--no-ext-diff".into(),
+        "--minimal".into(),
+        base,
+        sha,
+        "--".into(),
+    ];
+    args.append(&mut safe_paths);
+    run_git(Some(&repo), args).await
+}
+
+async fn build_snapshot(repo: &Path, history_limit: Option<u32>) -> CommandResult<RepoSnapshot> {
+    let history_limit = clamp_history_limit(history_limit);
     let status_output = run_git(
         Some(repo),
         vec![
@@ -405,6 +495,7 @@ async fn build_snapshot(repo: &Path) -> CommandResult<RepoSnapshot> {
             Some(repo),
             vec![
                 "branch".into(),
+                "--all".into(),
                 "--format=%(refname:short)%1f%(refname)%1f%(upstream:short)%1f%(HEAD)".into(),
             ],
         )
@@ -415,7 +506,11 @@ async fn build_snapshot(repo: &Path) -> CommandResult<RepoSnapshot> {
     let stashes = parse_stashes(
         &run_git(
             Some(repo),
-            vec!["stash".into(), "list".into(), "--format=%gd%x1f%H%x1f%gs".into()],
+            vec![
+                "stash".into(),
+                "list".into(),
+                "--format=%gd%x1f%H%x1f%gs".into(),
+            ],
         )
         .await?,
     );
@@ -424,10 +519,12 @@ async fn build_snapshot(repo: &Path) -> CommandResult<RepoSnapshot> {
             Some(repo),
             vec![
                 "log".into(),
+                "--all".into(),
+                "--topo-order".into(),
                 "--date=iso-strict".into(),
                 "--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1e".into(),
                 "-n".into(),
-                "500".into(),
+                history_limit.to_string(),
             ],
         )
         .await
@@ -445,7 +542,10 @@ async fn build_snapshot(repo: &Path) -> CommandResult<RepoSnapshot> {
         id: repo.to_string_lossy().to_string(),
         path: repo.to_string_lossy().to_string(),
         name,
-        provider: remotes.first().map(|remote| remote.provider).unwrap_or(GitProvider::Unknown),
+        provider: remotes
+            .first()
+            .map(|remote| remote.provider)
+            .unwrap_or(GitProvider::Unknown),
         remotes: remotes.clone(),
         head: branch_status.head_oid.clone(),
         worktree_state,
@@ -512,7 +612,11 @@ async fn run_git(repo: Option<&Path>, args: Vec<String>) -> CommandResult<String
     if output.status.success() {
         Ok(stdout)
     } else {
-        let detail = if stderr.trim().is_empty() { stdout } else { stderr };
+        let detail = if stderr.trim().is_empty() {
+            stdout
+        } else {
+            stderr
+        };
         Err(AppError::GitFailed {
             message: git_error_summary(&detail),
             detail,
@@ -551,11 +655,25 @@ fn parse_status(raw: &str) -> (BranchStatus, Vec<FileChange>, Vec<Conflict>) {
             continue;
         }
         if let Some(path) = record.strip_prefix("? ") {
-            changes.push(file_change(path, None, "?", "?", FileStatus::Untracked, false));
+            changes.push(file_change(
+                path,
+                None,
+                "?",
+                "?",
+                FileStatus::Untracked,
+                false,
+            ));
             continue;
         }
         if let Some(path) = record.strip_prefix("! ") {
-            changes.push(file_change(path, None, "!", "!", FileStatus::Ignored, false));
+            changes.push(file_change(
+                path,
+                None,
+                "!",
+                "!",
+                FileStatus::Ignored,
+                false,
+            ));
             continue;
         }
         if record.starts_with("1 ") {
@@ -567,7 +685,8 @@ fn parse_status(raw: &str) -> (BranchStatus, Vec<FileChange>, Vec<Conflict>) {
         }
         if record.starts_with("2 ") {
             let parts: Vec<&str> = record.splitn(10, ' ').collect();
-            if let (Some(xy), Some(score), Some(path)) = (parts.get(1), parts.get(8), parts.get(9)) {
+            if let (Some(xy), Some(score), Some(path)) = (parts.get(1), parts.get(8), parts.get(9))
+            {
                 let rename_score = score.trim_start_matches(['R', 'C']).parse::<i32>().ok();
                 changes.push(change_from_xy(path, None, xy, rename_score));
             }
@@ -594,7 +713,12 @@ fn parse_status(raw: &str) -> (BranchStatus, Vec<FileChange>, Vec<Conflict>) {
     (branch, changes, conflicts)
 }
 
-fn change_from_xy(path: &str, old_path: Option<String>, xy: &str, rename_score: Option<i32>) -> FileChange {
+fn change_from_xy(
+    path: &str,
+    old_path: Option<String>,
+    xy: &str,
+    rename_score: Option<i32>,
+) -> FileChange {
     let mut chars = xy.chars();
     let index = normalize_status_char(chars.next().unwrap_or(' '));
     let worktree = normalize_status_char(chars.next().unwrap_or(' '));
@@ -614,7 +738,15 @@ fn change_from_xy(path: &str, old_path: Option<String>, xy: &str, rename_score: 
         FileStatus::Unknown
     };
 
-    file_change(path, old_path, &index.to_string(), &worktree.to_string(), status, true).with_rename_score(rename_score)
+    file_change(
+        path,
+        old_path,
+        &index.to_string(),
+        &worktree.to_string(),
+        status,
+        true,
+    )
+    .with_rename_score(rename_score)
 }
 
 fn normalize_status_char(value: char) -> char {
@@ -766,7 +898,70 @@ fn parse_commits(raw: &str) -> Vec<Commit> {
         .collect()
 }
 
-async fn detect_worktree_state(repo: &Path, branch: &BranchStatus, changes: &[FileChange]) -> WorktreeState {
+async fn commit_base_ref(repo: &Path, sha: &str) -> CommandResult<String> {
+    const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    let output = run_git(
+        Some(repo),
+        vec![
+            "rev-list".into(),
+            "--parents".into(),
+            "-n".into(),
+            "1".into(),
+            sha.to_string(),
+        ],
+    )
+    .await?;
+    let mut parts = output.split_whitespace();
+    let Some(_commit) = parts.next() else {
+        return invalid("INVALID_REF", "Commit could not be resolved.");
+    };
+
+    Ok(parts.next().unwrap_or(EMPTY_TREE).to_string())
+}
+
+fn parse_commit_files(raw: &str) -> Vec<CommitFile> {
+    let mut parts = raw.split('\0').filter(|part| !part.is_empty());
+    let mut files = Vec::new();
+
+    while let Some(status_token) = parts.next() {
+        let status = status_from_name_status(status_token);
+        if matches!(status, FileStatus::Renamed | FileStatus::Copied) {
+            let Some(old_path) = parts.next() else { break };
+            let Some(path) = parts.next() else { break };
+            files.push(CommitFile {
+                path: path.to_string(),
+                old_path: Some(old_path.to_string()),
+                status,
+            });
+        } else if let Some(path) = parts.next() {
+            files.push(CommitFile {
+                path: path.to_string(),
+                old_path: None,
+                status,
+            });
+        }
+    }
+
+    files
+}
+
+fn status_from_name_status(status: &str) -> FileStatus {
+    match status.chars().next().unwrap_or(' ') {
+        'A' => FileStatus::Added,
+        'M' => FileStatus::Modified,
+        'D' => FileStatus::Deleted,
+        'R' => FileStatus::Renamed,
+        'C' => FileStatus::Copied,
+        'U' => FileStatus::Conflicted,
+        _ => FileStatus::Unknown,
+    }
+}
+
+async fn detect_worktree_state(
+    repo: &Path,
+    branch: &BranchStatus,
+    changes: &[FileChange],
+) -> WorktreeState {
     let git_dir = run_git(Some(repo), vec!["rev-parse".into(), "--git-dir".into()])
         .await
         .ok()
@@ -784,7 +979,9 @@ async fn detect_worktree_state(repo: &Path, branch: &BranchStatus, changes: &[Fi
         }
     }
 
-    if branch.current_branch.as_deref() == Some("(detached)") || branch.current_branch.as_deref() == Some("HEAD") {
+    if branch.current_branch.as_deref() == Some("(detached)")
+        || branch.current_branch.as_deref() == Some("HEAD")
+    {
         return WorktreeState::Detached;
     }
 
@@ -812,7 +1009,10 @@ fn validate_file_paths(paths: &[String]) -> CommandResult<Vec<String>> {
         }
 
         for component in candidate.components() {
-            if matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)) {
+            if matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            ) {
                 return invalid("INVALID_PATH", "File paths cannot leave the repository.");
             }
         }
@@ -828,7 +1028,10 @@ fn validate_ref_arg(value: &str, label: &str) -> CommandResult<()> {
         return invalid("INVALID_REF", &format!("{label} is required."));
     }
     if value.starts_with('-') || value.chars().any(|ch| ch.is_control()) {
-        return invalid("INVALID_REF", &format!("{label} contains unsafe characters."));
+        return invalid(
+            "INVALID_REF",
+            &format!("{label} contains unsafe characters."),
+        );
     }
     Ok(())
 }
@@ -839,6 +1042,25 @@ fn validate_stash_ref(value: &str) -> CommandResult<()> {
         return invalid("INVALID_REF", "Stash reference must use stash@{n} format.");
     }
     Ok(())
+}
+
+fn validate_remote_url(value: &str) -> CommandResult<()> {
+    if value.trim().is_empty() {
+        return invalid("INVALID_REMOTE_URL", "Remote URL is required.");
+    }
+    if value.starts_with('-') || value.chars().any(|ch| ch.is_control()) {
+        return invalid(
+            "INVALID_REMOTE_URL",
+            "Remote URL contains unsafe characters.",
+        );
+    }
+    Ok(())
+}
+
+fn clamp_history_limit(value: Option<u32>) -> u32 {
+    value
+        .unwrap_or(DEFAULT_HISTORY_LIMIT)
+        .clamp(MIN_HISTORY_LIMIT, MAX_HISTORY_LIMIT)
 }
 
 fn optional_string(value: &str) -> Option<String> {
@@ -903,6 +1125,7 @@ fn invalid<T>(code: &'static str, message: &str) -> CommandResult<T> {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("OpenGit");
@@ -923,10 +1146,13 @@ pub fn run() {
             git_fetch,
             git_pull,
             git_push,
+            git_remote_add,
             git_stash_push,
             git_stash_apply,
             git_stash_drop,
-            git_diff
+            git_diff,
+            git_commit_files,
+            git_commit_file_diff
         ])
         .run(tauri::generate_context!())
         .expect("error while running OpenGit");
@@ -941,6 +1167,22 @@ mod tests {
         assert!(validate_file_paths(&["src/main.rs".into()]).is_ok());
         assert!(validate_file_paths(&["../secret".into()]).is_err());
         assert!(validate_file_paths(&["/tmp/secret".into()]).is_err());
+    }
+
+    #[test]
+    fn validates_remote_urls() {
+        assert!(validate_remote_url("git@github.com:owner/repo.git").is_ok());
+        assert!(validate_remote_url("https://github.com/owner/repo.git").is_ok());
+        assert!(validate_remote_url("").is_err());
+        assert!(validate_remote_url("--upload-pack=bad").is_err());
+    }
+
+    #[test]
+    fn clamps_history_limit() {
+        assert_eq!(clamp_history_limit(None), DEFAULT_HISTORY_LIMIT);
+        assert_eq!(clamp_history_limit(Some(1)), MIN_HISTORY_LIMIT);
+        assert_eq!(clamp_history_limit(Some(750)), 750);
+        assert_eq!(clamp_history_limit(Some(10_000)), MAX_HISTORY_LIMIT);
     }
 
     #[test]
@@ -974,5 +1216,19 @@ mod tests {
         assert!(changes[1].staged);
         assert!(!changes[1].unstaged);
         assert_eq!(changes[2].path, "docs/new.md");
+    }
+
+    #[test]
+    fn parses_commit_name_status_records() {
+        let files = parse_commit_files("M\0src/app.rs\0A\0docs/new.md\0R100\0old.ts\0new.ts\0");
+
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].path, "src/app.rs");
+        assert!(matches!(files[0].status, FileStatus::Modified));
+        assert_eq!(files[1].path, "docs/new.md");
+        assert!(matches!(files[1].status, FileStatus::Added));
+        assert_eq!(files[2].path, "new.ts");
+        assert_eq!(files[2].old_path.as_deref(), Some("old.ts"));
+        assert!(matches!(files[2].status, FileStatus::Renamed));
     }
 }

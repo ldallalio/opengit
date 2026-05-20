@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { RepoSnapshot } from "@opengit/core";
-import { demoDiff, demoSnapshot } from "./demo";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import type { CommitFile, RepoSnapshot } from "@opengit/core";
+import { demoCommitFiles, demoDiff, demoSnapshot } from "./demo";
 
 export class OpenGitApiError extends Error {
   code: string;
@@ -33,12 +34,32 @@ async function call<T>(command: string, args: Record<string, unknown>, fallback:
   }
 }
 
-export const openRepo = (path: string) => call<RepoSnapshot>("repo_open", { path }, demoSnapshot);
+export const openRepo = (path: string, historyLimit?: number) =>
+  call<RepoSnapshot>("repo_open", { path, historyLimit }, demoSnapshot);
 
-export const refreshRepo = (repoPath: string) => call<RepoSnapshot>("repo_status", { repoPath }, demoSnapshot);
+export async function chooseRepositoryFolder(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return window.prompt("Repository path", demoSnapshot.repository.path);
+  }
 
-export const cloneRepo = (url: string, destination: string) =>
-  call<RepoSnapshot>("repo_clone", { url, destination }, demoSnapshot);
+  const selected = await openDialog({
+    directory: true,
+    multiple: false,
+    title: "Open Git Repository"
+  });
+
+  if (Array.isArray(selected)) {
+    return selected[0] ?? null;
+  }
+
+  return selected;
+}
+
+export const refreshRepo = (repoPath: string, historyLimit?: number) =>
+  call<RepoSnapshot>("repo_status", { repoPath, historyLimit }, demoSnapshot);
+
+export const cloneRepo = (url: string, destination: string, historyLimit?: number) =>
+  call<RepoSnapshot>("repo_clone", { url, destination, historyLimit }, demoSnapshot);
 
 export const stagePaths = (repoPath: string, paths: string[]) =>
   call<RepoSnapshot>("git_stage", { repoPath, paths }, demoSnapshot);
@@ -57,8 +78,11 @@ export const fetchRepo = (repoPath: string, remote?: string) =>
 
 export const pullRepo = (repoPath: string) => call<RepoSnapshot>("git_pull", { repoPath }, demoSnapshot);
 
-export const pushRepo = (repoPath: string, remote?: string, branch?: string, forceWithLease = false) =>
-  call<RepoSnapshot>("git_push", { repoPath, remote, branch, forceWithLease }, demoSnapshot);
+export const pushRepo = (repoPath: string, remote?: string, branch?: string, forceWithLease = false, setUpstream = false) =>
+  call<RepoSnapshot>("git_push", { repoPath, remote, branch, forceWithLease, setUpstream }, demoSnapshot);
+
+export const addRemote = (repoPath: string, name: string, url: string) =>
+  call<RepoSnapshot>("git_remote_add", { repoPath, name, url }, demoSnapshot);
 
 export const createBranch = (repoPath: string, name: string, checkout: boolean) =>
   call<RepoSnapshot>("git_branch_create", { request: { repoPath, name, checkout } }, demoSnapshot);
@@ -80,3 +104,9 @@ export const stashDrop = (repoPath: string, stash: string) =>
 
 export const getDiff = (repoPath: string, path: string, staged: boolean) =>
   call<string>("git_diff", { repoPath, path, staged }, demoDiff);
+
+export const getCommitFiles = (repoPath: string, sha: string) =>
+  call<CommitFile[]>("git_commit_files", { repoPath, sha }, demoCommitFiles);
+
+export const getCommitFileDiff = (repoPath: string, sha: string, path: string, oldPath?: string) =>
+  call<string>("git_commit_file_diff", { repoPath, sha, path, oldPath }, demoDiff);

@@ -119,6 +119,12 @@ export interface FileChange {
   renameScore?: number;
 }
 
+export interface CommitFile {
+  path: string;
+  oldPath?: string;
+  status: FileStatus;
+}
+
 export type FileStatus =
   | "added"
   | "modified"

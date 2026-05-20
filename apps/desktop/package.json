@@ -14,8 +14,9 @@
   "dependencies": {
     "@opengit/core": "file:../../packages/core",
     "@opengit/ui": "file:../../packages/ui",
-    "@tauri-apps/api": "^2.11.0",
     "@tanstack/react-query": "^5.90.12",
+    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.556.0",
     "react": "^19.2.6",
