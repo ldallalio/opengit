@@ -84,14 +84,32 @@ export const pushRepo = (repoPath: string, remote?: string, branch?: string, for
 export const addRemote = (repoPath: string, name: string, url: string) =>
   call<RepoSnapshot>("git_remote_add", { repoPath, name, url }, demoSnapshot);
 
-export const createBranch = (repoPath: string, name: string, checkout: boolean) =>
-  call<RepoSnapshot>("git_branch_create", { request: { repoPath, name, checkout } }, demoSnapshot);
+export const createBranch = (repoPath: string, name: string, checkout: boolean, startPoint?: string) =>
+  call<RepoSnapshot>("git_branch_create", { request: { repoPath, name, checkout, startPoint } }, demoSnapshot);
 
 export const checkoutBranch = (repoPath: string, name: string) =>
   call<RepoSnapshot>("git_branch_checkout", { repoPath, name }, demoSnapshot);
 
 export const deleteBranch = (repoPath: string, name: string, force: boolean) =>
   call<RepoSnapshot>("git_branch_delete", { repoPath, name, force }, demoSnapshot);
+
+export const renameBranch = (repoPath: string, oldName: string, newName: string) =>
+  call<RepoSnapshot>("git_branch_rename", { repoPath, oldName, newName }, demoSnapshot);
+
+export const mergeBranch = (repoPath: string, branch: string) =>
+  call<RepoSnapshot>("git_merge", { repoPath, branch }, demoSnapshot);
+
+export const rebaseOnto = (repoPath: string, upstream: string) =>
+  call<RepoSnapshot>("git_rebase", { repoPath, upstream }, demoSnapshot);
+
+export const cherryPickCommit = (repoPath: string, commitSha: string) =>
+  call<RepoSnapshot>("git_cherry_pick", { repoPath, commitSha }, demoSnapshot);
+
+export const revertCommit = (repoPath: string, commitSha: string) =>
+  call<RepoSnapshot>("git_revert", { repoPath, commitSha }, demoSnapshot);
+
+export const createTag = (repoPath: string, name: string, target: string, message?: string) =>
+  call<RepoSnapshot>("git_tag_create", { repoPath, name, target, message }, demoSnapshot);
 
 export const stashPush = (repoPath: string, message: string) =>
   call<RepoSnapshot>("git_stash_push", { repoPath, message }, demoSnapshot);

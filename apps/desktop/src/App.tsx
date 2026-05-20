@@ -1,5 +1,13 @@
-import { type CSSProperties, type ReactNode, useEffect, useMemo, useState } from "react";
-import type { Commit, CommitFile, FileChange, FileStatus, RepoSnapshot } from "@opengit/core";
+import {
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useState
+} from "react";
+import type { Branch, Commit, CommitFile, FileChange, FileStatus, RepoSnapshot } from "@opengit/core";
 import { Button, EmptyState, IconButton, Panel } from "@opengit/ui";
 import {
   AlertTriangle,
@@ -8,6 +16,7 @@ import {
   Bell,
   Boxes,
   Check,
+  ChevronDown,
   ChevronRight,
   ClipboardList,
   Code2,
@@ -21,6 +30,8 @@ import {
   GitPullRequest,
   History,
   Link2,
+  Maximize2,
+  Minimize2,
   Moon,
   PackageOpen,
   Plug,
@@ -42,10 +53,12 @@ import {
 import { clsx } from "clsx";
 import {
   addRemote,
+  cherryPickCommit,
   chooseRepositoryFolder,
   checkoutBranch,
   commit,
   createBranch,
+  createTag,
   deleteBranch,
   discardPaths,
   fetchRepo,
@@ -53,10 +66,14 @@ import {
   getCommitFiles,
   getDiff,
   isTauriRuntime,
+  mergeBranch,
   openRepo,
   pullRepo,
   pushRepo,
+  rebaseOnto,
   refreshRepo,
+  renameBranch,
+  revertCommit,
   stagePaths,
   stashApply,
   stashDrop,
@@ -67,8 +84,82 @@ import { demoSnapshot } from "./demo";
 
 type Theme = "dark" | "light";
 type DiffMode = "commit" | "working";
+type CenterView = "graph" | "diff";
+type ResizeTarget =
+  | "sidebar"
+  | "detail"
+  | "bottom"
+  | "sidebarBranches"
+  | "sidebarRemotes"
+  | "sidebarStashes"
+  | "detailSelection"
+  | "bottomCommit"
+  | "bottomOperations";
+type LayoutState = {
+  sidebarWidth: number;
+  detailWidth: number;
+  bottomHeight: number;
+  sidebarBranchesHeight: number;
+  sidebarRemotesHeight: number;
+  sidebarStashesHeight: number;
+  detailSelectionHeight: number;
+  bottomCommitWidth: number;
+  bottomOperationsWidth: number;
+  sidebarCollapsed: boolean;
+  detailCollapsed: boolean;
+  bottomCollapsed: boolean;
+};
 type RefKind = "head" | "local" | "remote" | "tag" | "other";
-type RefChip = { label: string; kind: RefKind; color: string };
+type RefChip = { label: string; kind: RefKind; color: string; raw: string };
+type DisplayBranch = Branch & { isRemote: boolean; isUnborn: boolean };
+type BranchMenuTarget = {
+  name: string;
+  fullRef: string;
+  kind: RefKind;
+  source: "sidebar" | "graph";
+  commitSha?: string;
+  upstream?: string;
+  isCurrent: boolean;
+  isProtected: boolean;
+  isRemote: boolean;
+  isTag: boolean;
+  isUnborn: boolean;
+};
+type BranchMenuState = {
+  x: number;
+  y: number;
+  target: BranchMenuTarget;
+};
+type BranchMenuAction =
+  | "pull"
+  | "push"
+  | "set-upstream"
+  | "merge"
+  | "rebase"
+  | "checkout"
+  | "create-worktree"
+  | "create-branch"
+  | "cherry-pick"
+  | "reset"
+  | "revert"
+  | "open-pr"
+  | "explain"
+  | "rename"
+  | "delete"
+  | "delete-remote"
+  | "copy-name"
+  | "copy-sha"
+  | "copy-branch-link"
+  | "copy-commit-link"
+  | "create-patch"
+  | "share-patch"
+  | "pin-left"
+  | "solo"
+  | "create-tag"
+  | "create-annotated-tag";
+type BranchMenuItem =
+  | { type: "separator"; key: string }
+  | { type: "item"; action: BranchMenuAction; label: string; disabled?: boolean; danger?: boolean; hint?: string };
 type GraphConnection = { from: number; to: number; color: string; terminal?: boolean };
 type GraphRow = {
   commit: Commit;
@@ -99,6 +190,20 @@ const graphLaneWidth = 18;
 const graphRowHeight = 42;
 const maxVisibleGraphLanes = 12;
 const historyLimitOptions = [100, 250, 500, 1000, 2000] as const;
+const defaultLayout: LayoutState = {
+  sidebarWidth: 280,
+  detailWidth: 340,
+  bottomHeight: 260,
+  sidebarBranchesHeight: 180,
+  sidebarRemotesHeight: 145,
+  sidebarStashesHeight: 145,
+  detailSelectionHeight: 142,
+  bottomCommitWidth: 330,
+  bottomOperationsWidth: 260,
+  sidebarCollapsed: false,
+  detailCollapsed: false,
+  bottomCollapsed: false
+};
 
 function loadRecentRepos() {
   try {
@@ -112,6 +217,10 @@ function loadRecentRepos() {
 function loadHistoryLimit() {
   const parsed = Number(localStorage.getItem("opengit:historyLimit"));
   return historyLimitOptions.includes(parsed as (typeof historyLimitOptions)[number]) ? parsed : 250;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 export default function App() {
@@ -128,6 +237,8 @@ export default function App() {
   const [diff, setDiff] = useState("");
   const [commitDiff, setCommitDiff] = useState("");
   const [diffMode, setDiffMode] = useState<DiffMode>("commit");
+  const [centerView, setCenterView] = useState<CenterView>("graph");
+  const [diffExpanded, setDiffExpanded] = useState(false);
   const [commitFilesLoading, setCommitFilesLoading] = useState(false);
   const [commitDiffLoading, setCommitDiffLoading] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
@@ -142,6 +253,10 @@ export default function App() {
   const [preferencesSection, setPreferencesSection] = useState<PreferenceSection>("repositories");
   const [error, setError] = useState<string | null>(null);
   const [recentRepos, setRecentRepos] = useState<string[]>(loadRecentRepos);
+  const [layout, setLayout] = useState<LayoutState>(defaultLayout);
+  const [branchMenu, setBranchMenu] = useState<BranchMenuState | null>(null);
+  const [branchSwitcherOpen, setBranchSwitcherOpen] = useState(false);
+  const [branchSearch, setBranchSearch] = useState("");
   const [operationLog, setOperationLog] = useState<string[]>([
     runningInTauri ? "OpenGit ready" : "Browser preview uses demo data"
   ]);
@@ -152,6 +267,22 @@ export default function App() {
   const activeDiff = diffMode === "commit" ? commitDiff : diff;
   const activeDiffLoading = diffMode === "commit" && commitDiffLoading;
   const graphRows = useMemo(() => buildGraphRows(snapshot?.commits ?? []), [snapshot]);
+  const topbarBranches = useMemo(() => (snapshot ? displayBranches(snapshot) : []), [snapshot]);
+  const filteredTopbarBranches = useMemo(() => filterBranches(topbarBranches, branchSearch), [topbarBranches, branchSearch]);
+  const contentGridStyle = {
+    "--sidebar-track": layout.sidebarCollapsed ? "0px" : `${layout.sidebarWidth}px`,
+    "--sidebar-handle-track": layout.sidebarCollapsed ? "0px" : "6px",
+    "--detail-track": layout.detailCollapsed ? "0px" : `${layout.detailWidth}px`,
+    "--detail-handle-track": layout.detailCollapsed ? "0px" : "6px",
+    "--bottom-track": layout.bottomCollapsed ? "0px" : `${layout.bottomHeight}px`,
+    "--bottom-handle-track": layout.bottomCollapsed ? "0px" : "6px",
+    "--sidebar-branches-height": `${layout.sidebarBranchesHeight}px`,
+    "--sidebar-remotes-height": `${layout.sidebarRemotesHeight}px`,
+    "--sidebar-stashes-height": `${layout.sidebarStashesHeight}px`,
+    "--detail-selection-height": `${layout.detailSelectionHeight}px`,
+    "--bottom-commit-width": `${layout.bottomCommitWidth}px`,
+    "--bottom-operations-width": `${layout.bottomOperationsWidth}px`
+  } as CSSProperties;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -173,6 +304,42 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   });
+
+  useEffect(() => {
+    if (!branchMenu) return;
+
+    const closeMenu = () => setBranchMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setBranchMenu(null);
+      }
+    };
+
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [branchMenu]);
+
+  useEffect(() => {
+    if (!branchSwitcherOpen) return;
+
+    const closeSwitcher = () => setBranchSwitcherOpen(false);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setBranchSwitcherOpen(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", closeSwitcher);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeSwitcher);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [branchSwitcherOpen]);
 
   useEffect(() => {
     if (!snapshot || !selectedFile) {
@@ -269,6 +436,8 @@ export default function App() {
     setSelectedCommit(next.commits[0] ?? null);
     setSelectedFile(next.changes[0] ?? null);
     setDiffMode(next.commits.length > 0 ? "commit" : "working");
+    setCenterView("graph");
+    setDiffExpanded(false);
   };
 
   const runSnapshotOperation = async (label: string, operation: () => Promise<RepoSnapshot>) => {
@@ -331,6 +500,237 @@ export default function App() {
     }
   };
 
+  const openCommitDiff = (file: CommitFile) => {
+    setSelectedCommitFile(file);
+    setDiffMode("commit");
+    setCenterView("diff");
+  };
+
+  const openWorkingDiff = (change: FileChange) => {
+    setSelectedFile(change);
+    setDiffMode("working");
+    setCenterView("diff");
+  };
+
+  const openBranchMenu = (target: BranchMenuTarget, event: ReactMouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const menuWidth = 360;
+    const menuHeight = 560;
+    setBranchMenu({
+      target,
+      x: clamp(event.clientX, 8, Math.max(8, window.innerWidth - menuWidth - 8)),
+      y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - menuHeight - 8))
+    });
+  };
+
+  const pendingBranchAction = (label: string) => {
+    setBranchMenu(null);
+    const message = `${label} is planned but not implemented yet.`;
+    setError(message);
+    setOperationLog((log) => [message, ...log].slice(0, 8));
+  };
+
+  const copyMenuText = async (label: string, value?: string) => {
+    setBranchMenu(null);
+    if (!value) {
+      setError(`${label} is unavailable for this item.`);
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(value);
+      setOperationLog((log) => [`Copied ${label}`, ...log].slice(0, 8));
+    } catch {
+      setError("Clipboard is unavailable in this environment.");
+    }
+  };
+
+  const runBranchTargetOperation = (
+    label: string,
+    operation: (repo: string) => Promise<RepoSnapshot>,
+    confirmMessage?: string
+  ) => {
+    const repo = requireRepo();
+    if (!repo) return;
+    setBranchMenu(null);
+    if (confirmMessage && !window.confirm(confirmMessage)) return;
+    void runSnapshotOperation(label, () => operation(repo));
+  };
+
+  const handleBranchMenuAction = (action: BranchMenuAction, target: BranchMenuTarget) => {
+    const branchRecord = snapshot ? findBranchByName(snapshot, target.name) : undefined;
+    const currentBranch = snapshot?.currentBranch ?? "current branch";
+    const remote = snapshot?.remotes[0];
+
+    if (action === "copy-name") {
+      void copyMenuText(target.isTag ? "tag name" : "branch name", target.name);
+      return;
+    }
+
+    if (action === "copy-sha") {
+      void copyMenuText("commit SHA", target.commitSha);
+      return;
+    }
+
+    if (action === "pull") {
+      runBranchTargetOperation("Pull", (repo) => pullRepo(repo));
+      return;
+    }
+
+    if (action === "push") {
+      if (!remote) {
+        setBranchMenu(null);
+        setError("Add a remote before pushing.");
+        return;
+      }
+      runBranchTargetOperation("Push branch", (repo) => pushRepo(repo, remote.name, target.name, false, !branchRecord?.upstream));
+      return;
+    }
+
+    if (action === "set-upstream") {
+      if (!remote) {
+        setBranchMenu(null);
+        setError("Add a remote before setting upstream.");
+        return;
+      }
+      runBranchTargetOperation("Set upstream", (repo) => pushRepo(repo, remote.name, target.name, false, true));
+      return;
+    }
+
+    if (action === "merge") {
+      runBranchTargetOperation(
+        "Merge branch",
+        (repo) => mergeBranch(repo, target.name),
+        `Merge '${target.name}' into '${currentBranch}'?`
+      );
+      return;
+    }
+
+    if (action === "rebase") {
+      runBranchTargetOperation(
+        "Rebase branch",
+        (repo) => rebaseOnto(repo, target.name),
+        `Rebase '${currentBranch}' onto '${target.name}'?`
+      );
+      return;
+    }
+
+    if (action === "checkout") {
+      const message = target.isTag ? `Checkout tag '${target.name}'? This will detach HEAD.` : undefined;
+      runBranchTargetOperation("Checkout branch", (repo) => checkoutBranch(repo, target.name), message);
+      return;
+    }
+
+    if (action === "create-branch") {
+      const defaultName = defaultBranchFromTarget(target);
+      const nextName = window.prompt("New branch name", defaultName);
+      if (!nextName?.trim()) {
+        setBranchMenu(null);
+        return;
+      }
+      runBranchTargetOperation("Create branch", (repo) => createBranch(repo, nextName.trim(), true, target.commitSha ?? target.name));
+      return;
+    }
+
+    if (action === "cherry-pick" && target.commitSha) {
+      runBranchTargetOperation(
+        "Cherry-pick commit",
+        (repo) => cherryPickCommit(repo, target.commitSha!),
+        `Cherry-pick commit ${shortSha(target.commitSha)} onto '${currentBranch}'?`
+      );
+      return;
+    }
+
+    if (action === "revert" && target.commitSha) {
+      runBranchTargetOperation(
+        "Revert commit",
+        (repo) => revertCommit(repo, target.commitSha!),
+        `Revert commit ${shortSha(target.commitSha)} on '${currentBranch}'?`
+      );
+      return;
+    }
+
+    if (action === "rename") {
+      const nextName = window.prompt("Rename branch", target.name);
+      if (!nextName?.trim() || nextName.trim() === target.name) {
+        setBranchMenu(null);
+        return;
+      }
+      runBranchTargetOperation("Rename branch", (repo) => renameBranch(repo, target.name, nextName.trim()));
+      return;
+    }
+
+    if (action === "delete") {
+      runBranchTargetOperation("Delete branch", (repo) => deleteBranch(repo, target.name, false), `Delete branch '${target.name}'?`);
+      return;
+    }
+
+    if (action === "create-tag" || action === "create-annotated-tag") {
+      const tagName = window.prompt("Tag name", "");
+      if (!tagName?.trim()) {
+        setBranchMenu(null);
+        return;
+      }
+      const message = action === "create-annotated-tag" ? window.prompt("Tag message", tagName.trim())?.trim() : undefined;
+      runBranchTargetOperation("Create tag", (repo) => createTag(repo, tagName.trim(), target.commitSha ?? target.name, message));
+      return;
+    }
+
+    pendingBranchAction(menuPendingLabel(action));
+  };
+
+  const toggleLayoutSection = (section: "sidebar" | "detail" | "bottom") => {
+    setLayout((current) => {
+      if (section === "sidebar") return { ...current, sidebarCollapsed: !current.sidebarCollapsed };
+      if (section === "detail") return { ...current, detailCollapsed: !current.detailCollapsed };
+      return { ...current, bottomCollapsed: !current.bottomCollapsed };
+    });
+  };
+
+  const startResize = (target: ResizeTarget, event: ReactPointerEvent) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const initial = layout;
+    const resizeClass =
+      target === "bottom" || target === "sidebarBranches" || target === "sidebarRemotes" || target === "sidebarStashes" || target === "detailSelection"
+        ? "resizing-layout-horizontal"
+        : "resizing-layout-vertical";
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      const deltaY = moveEvent.clientY - startY;
+
+      setLayout((current) => {
+        const next = { ...current };
+        if (target === "sidebar") next.sidebarWidth = clamp(initial.sidebarWidth + deltaX, 180, 520);
+        if (target === "detail") next.detailWidth = clamp(initial.detailWidth - deltaX, 260, 680);
+        if (target === "bottom") next.bottomHeight = clamp(initial.bottomHeight - deltaY, 150, 520);
+        if (target === "sidebarBranches") next.sidebarBranchesHeight = clamp(initial.sidebarBranchesHeight + deltaY, 80, 420);
+        if (target === "sidebarRemotes") next.sidebarRemotesHeight = clamp(initial.sidebarRemotesHeight + deltaY, 80, 360);
+        if (target === "sidebarStashes") next.sidebarStashesHeight = clamp(initial.sidebarStashesHeight + deltaY, 80, 360);
+        if (target === "detailSelection") next.detailSelectionHeight = clamp(initial.detailSelectionHeight + deltaY, 80, 300);
+        if (target === "bottomCommit") next.bottomCommitWidth = clamp(initial.bottomCommitWidth - deltaX, 230, 560);
+        if (target === "bottomOperations") next.bottomOperationsWidth = clamp(initial.bottomOperationsWidth - deltaX, 180, 480);
+        return next;
+      });
+    };
+
+    const stopResize = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+      document.body.classList.remove("resizing-layout", resizeClass);
+    };
+
+    document.body.classList.add("resizing-layout", resizeClass);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+  };
+
   const requireRepo = () => {
     if (!snapshot) {
       setError("Open a repository first.");
@@ -384,6 +784,25 @@ export default function App() {
       setRemoteName("origin");
       setRemoteUrl("");
     });
+  };
+
+  const switchBranchFromTopbar = (branch: DisplayBranch) => {
+    if (branch.isCurrent || branch.isUnborn) {
+      setBranchSwitcherOpen(false);
+      return;
+    }
+
+    if (branch.isRemote) {
+      setError("Create a local branch from the remote branch before checking it out.");
+      setBranchSwitcherOpen(false);
+      return;
+    }
+
+    const repo = requireRepo();
+    if (!repo) return;
+    setBranchSwitcherOpen(false);
+    setBranchSearch("");
+    void runSnapshotOperation("Checkout branch", () => checkoutBranch(repo, branch.name));
   };
 
   const pushCurrentBranch = () => {
@@ -447,6 +866,40 @@ export default function App() {
 
       <section className="workspace">
         <header className="topbar">
+          <div className="repo-identity-strip" aria-label="Repository status">
+            <button className="repo-identity-card repository-card" type="button" onClick={browseForRepository} disabled={loading}>
+              <span>repository</span>
+              <strong>{snapshot?.repository.name ?? repoNameFromPath(repoPath)}</strong>
+              <small>{snapshot?.repository.path ?? repoPath}</small>
+              <ChevronRight size={14} />
+            </button>
+            <div className="branch-switcher-wrap" onPointerDown={(event) => event.stopPropagation()}>
+              <button
+                className="repo-identity-card branch-card"
+                type="button"
+                onClick={() => {
+                  setBranchSearch("");
+                  setBranchSwitcherOpen((open) => !open);
+                }}
+                disabled={!snapshot || topbarBranches.length === 0}
+                aria-haspopup="menu"
+                aria-expanded={branchSwitcherOpen}
+              >
+                <span>branch</span>
+                <strong>{snapshot?.currentBranch ?? "No branch"}</strong>
+                <small>{snapshot?.upstream ?? "local"}</small>
+                <ChevronDown size={14} />
+              </button>
+              {branchSwitcherOpen && (
+                <BranchSwitcher
+                  branches={filteredTopbarBranches}
+                  query={branchSearch}
+                  setQuery={setBranchSearch}
+                  onSelect={switchBranchFromTopbar}
+                />
+              )}
+            </div>
+          </div>
           <div className="repo-open">
             <PackageOpen size={18} />
             <input value={repoPath} onChange={(event) => setRepoPath(event.target.value)} aria-label="Repository path" />
@@ -456,6 +909,29 @@ export default function App() {
             <Button variant="primary" onClick={openCurrentPath} disabled={loading}>
               Open
             </Button>
+          </div>
+          <div className="layout-controls" aria-label="Layout controls">
+            <IconButton
+              label={layout.sidebarCollapsed ? "Expand left sections" : "Collapse left sections"}
+              className={clsx(layout.sidebarCollapsed && "muted")}
+              onClick={() => toggleLayoutSection("sidebar")}
+            >
+              <GitBranch size={15} />
+            </IconButton>
+            <IconButton
+              label={layout.detailCollapsed ? "Expand detail sections" : "Collapse detail sections"}
+              className={clsx(layout.detailCollapsed && "muted")}
+              onClick={() => toggleLayoutSection("detail")}
+            >
+              <FileText size={15} />
+            </IconButton>
+            <IconButton
+              label={layout.bottomCollapsed ? "Expand bottom sections" : "Collapse bottom sections"}
+              className={clsx(layout.bottomCollapsed && "muted")}
+              onClick={() => toggleLayoutSection("bottom")}
+            >
+              <ClipboardList size={15} />
+            </IconButton>
           </div>
           <div className="repo-state">
             {snapshot && (
@@ -481,7 +957,16 @@ export default function App() {
           </div>
         )}
 
-        <div className="content-grid">
+        <div
+          className={clsx(
+            "content-grid",
+            centerView === "diff" && diffExpanded && "diff-expanded",
+            layout.sidebarCollapsed && "sidebar-collapsed",
+            layout.detailCollapsed && "detail-collapsed",
+            layout.bottomCollapsed && "bottom-collapsed"
+          )}
+          style={contentGridStyle}
+        >
           <Sidebar
             snapshot={snapshot}
             branchName={branchName}
@@ -495,10 +980,6 @@ export default function App() {
             createBranch={branchCreate}
             addRemote={addRepositoryRemote}
             stashCurrent={stashCurrent}
-            checkout={(name) => {
-              const repo = requireRepo();
-              if (repo) void runSnapshotOperation("Checkout branch", () => checkoutBranch(repo, name));
-            }}
             deleteBranch={(name) => {
               const repo = requireRepo();
               if (repo && window.confirm(`Delete branch '${name}'?`)) {
@@ -515,37 +996,81 @@ export default function App() {
                 void runSnapshotOperation("Drop stash", () => stashDrop(repo, stash));
               }
             }}
+            openBranchMenu={openBranchMenu}
+            startResize={startResize}
+          />
+
+          <ResizeHandle
+            className="sidebar-resize"
+            label="Resize left sections"
+            orientation="vertical"
+            onPointerDown={(event) => startResize("sidebar", event)}
           />
 
           <Panel
-            title="History"
-            className="history-panel"
+            title={centerView === "diff" ? "Diff Review" : "History"}
+            className={clsx("history-panel", centerView === "diff" && "diff-review-panel", diffExpanded && "expanded")}
             actions={
-              <div className="history-panel-actions">
-                <span>{snapshot ? `${snapshot.commits.length}/${historyLimit}` : "0"}</span>
-                <select
-                  value={historyLimit}
-                  onChange={(event) => changeHistoryLimit(Number(event.target.value))}
-                  aria-label="History commit limit"
-                  disabled={loading}
-                >
-                  {historyLimitOptions.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
-                <History size={15} />
-              </div>
+              centerView === "diff" ? (
+                <div className="history-panel-actions">
+                  <IconButton
+                    label={diffExpanded ? "Restore diff size" : "Expand diff"}
+                    onClick={() => setDiffExpanded((expanded) => !expanded)}
+                  >
+                    {diffExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                  </IconButton>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setCenterView("graph");
+                      setDiffExpanded(false);
+                    }}
+                  >
+                    Close Diff
+                  </Button>
+                  <Code2 size={15} />
+                </div>
+              ) : (
+                <div className="history-panel-actions">
+                  <span>{snapshot ? `${snapshot.commits.length}/${historyLimit}` : "0"}</span>
+                  <select
+                    value={historyLimit}
+                    onChange={(event) => changeHistoryLimit(Number(event.target.value))}
+                    aria-label="History commit limit"
+                    disabled={loading}
+                  >
+                    {historyLimitOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                  <History size={15} />
+                </div>
+              )
             }
           >
-            {snapshot && snapshot.commits.length > 0 ? (
+            {centerView === "diff" ? (
+              activeDiffPath ? (
+                <SplitDiffViewer path={activeDiffPath} diff={activeDiff} loading={activeDiffLoading} />
+              ) : (
+                <EmptyState>No file selected</EmptyState>
+              )
+            ) : snapshot && (snapshot.commits.length > 0 || snapshot.changes.length > 0) ? (
               <CommitGraphTable
                 rows={graphRows}
                 selectedSha={selectedCommit?.sha}
+                snapshot={snapshot}
+                commitMessage={commitMessage}
+                setCommitMessage={setCommitMessage}
+                stagedCount={stagedChanges.length}
+                unstagedCount={unstagedChanges.length}
+                onOpenBranchMenu={openBranchMenu}
                 onSelect={(commitItem) => {
                   setSelectedCommit(commitItem);
                   setDiffMode("commit");
+                  setCenterView("graph");
+                  setDiffExpanded(false);
                 }}
               />
             ) : snapshot ? (
@@ -559,8 +1084,15 @@ export default function App() {
             )}
           </Panel>
 
+          <ResizeHandle
+            className="detail-resize"
+            label="Resize detail sections"
+            orientation="vertical"
+            onPointerDown={(event) => startResize("detail", event)}
+          />
+
           <aside className="detail-stack">
-            <Panel title="Selection" actions={<GitCommitHorizontal size={15} />}>
+            <Panel title="Selection" className="selection-panel" actions={<GitCommitHorizontal size={15} />}>
               {selectedCommit ? (
                 <div className="selection-detail">
                   <strong>{selectedCommit.message || "(no subject)"}</strong>
@@ -573,41 +1105,40 @@ export default function App() {
                 <EmptyState>No commit selected</EmptyState>
               )}
             </Panel>
+            <ResizeHandle
+              className="detail-stack-resize"
+              label="Resize selected commit details"
+              orientation="horizontal"
+              onPointerDown={(event) => startResize("detailSelection", event)}
+            />
 
-            <Panel title={`Changed Files (${commitFiles.length})`} actions={<FileText size={15} />}>
+            <Panel title={`Changed Files (${commitFiles.length})`} className="changed-files-panel" actions={<FileText size={15} />}>
               <CommitFileList
                 files={commitFiles}
                 selected={selectedCommitFile}
                 loading={commitFilesLoading}
                 error={commitFileError}
-                onSelect={(file) => {
-                  setSelectedCommitFile(file);
-                  setDiffMode("commit");
-                }}
+                onSelect={openCommitDiff}
               />
-            </Panel>
-
-            <Panel title="Diff" actions={<Code2 size={15} />}>
-              {activeDiffPath ? (
-                <SplitDiffViewer path={activeDiffPath} diff={activeDiff} loading={activeDiffLoading} />
-              ) : (
-                <EmptyState>No file selected</EmptyState>
-              )}
             </Panel>
           </aside>
 
+          <ResizeHandle
+            className="bottom-resize"
+            label="Resize bottom sections"
+            orientation="horizontal"
+            onPointerDown={(event) => startResize("bottom", event)}
+          />
+
           <section className="bottom-area">
-            <Panel title={`Changes (${snapshot?.changes.length ?? 0})`} actions={<ClipboardList size={15} />}>
+            <Panel title={`Changes (${snapshot?.changes.length ?? 0})`} className="changes-panel" actions={<ClipboardList size={15} />}>
               {snapshot ? (
                 <div className="changes-grid">
                   <ChangeColumn
                     title={`Unstaged (${unstagedChanges.length})`}
                     changes={unstagedChanges}
                     selected={selectedFile}
-                    onSelect={(change) => {
-                      setSelectedFile(change);
-                      setDiffMode("working");
-                    }}
+                    onSelect={openWorkingDiff}
                     bulkAction={() => batchFileAction("Stage all", unstagedChanges, stagePaths)}
                     bulkDisabled={loading || unstagedChanges.length === 0}
                     bulkLabel="Stage All"
@@ -623,10 +1154,7 @@ export default function App() {
                     title={`Staged (${stagedChanges.length})`}
                     changes={stagedChanges}
                     selected={selectedFile}
-                    onSelect={(change) => {
-                      setSelectedFile(change);
-                      setDiffMode("working");
-                    }}
+                    onSelect={openWorkingDiff}
                     bulkAction={() => batchFileAction("Unstage all", stagedChanges, unstagePaths)}
                     bulkDisabled={loading || stagedChanges.length === 0}
                     bulkLabel="Unstage All"
@@ -643,8 +1171,14 @@ export default function App() {
                 <EmptyState>No working tree loaded</EmptyState>
               )}
             </Panel>
+            <ResizeHandle
+              className="bottom-commit-resize"
+              label="Resize commit section"
+              orientation="vertical"
+              onPointerDown={(event) => startResize("bottomCommit", event)}
+            />
 
-            <Panel title="Commit" actions={<SquarePen size={15} />}>
+            <Panel title="Commit" className="commit-panel" actions={<SquarePen size={15} />}>
               <div className="commit-box">
                 <textarea
                   value={commitMessage}
@@ -661,8 +1195,14 @@ export default function App() {
                 </Button>
               </div>
             </Panel>
+            <ResizeHandle
+              className="bottom-operations-resize"
+              label="Resize operations section"
+              orientation="vertical"
+              onPointerDown={(event) => startResize("bottomOperations", event)}
+            />
 
-            <Panel title="Operations">
+            <Panel title="Operations" className="operations-panel">
               <div className="operation-log">
                 {operationLog.map((entry, index) => (
                   <span key={`${entry}-${index}`}>{entry}</span>
@@ -672,6 +1212,15 @@ export default function App() {
           </section>
         </div>
       </section>
+
+      {branchMenu && (
+        <BranchContextMenu
+          state={branchMenu}
+          snapshot={snapshot}
+          onAction={handleBranchMenuAction}
+          onClose={() => setBranchMenu(null)}
+        />
+      )}
 
       {paletteOpen && (
         <CommandPalette
@@ -710,6 +1259,121 @@ export default function App() {
   );
 }
 
+function BranchContextMenu({
+  state,
+  snapshot,
+  onAction,
+  onClose
+}: {
+  state: BranchMenuState;
+  snapshot: RepoSnapshot | null;
+  onAction: (action: BranchMenuAction, target: BranchMenuTarget) => void;
+  onClose: () => void;
+}) {
+  const { target } = state;
+  const items = branchMenuItems(target, snapshot);
+  const menuStyle = {
+    left: state.x,
+    top: state.y,
+    maxHeight: `calc(100vh - ${state.y + 12}px)`
+  } as CSSProperties;
+
+  return (
+    <div className="branch-context-menu" style={menuStyle} role="menu" aria-label={`${target.name} actions`} onPointerDown={(event) => event.stopPropagation()}>
+      <div className="branch-context-menu-header">
+        <span className={clsx("status-chip", target.isTag ? "tag" : target.isRemote ? "remote" : "branch")}>
+          {target.isTag ? "tag" : target.isRemote ? "remote" : target.isCurrent ? "current" : "branch"}
+        </span>
+        <strong>{target.name}</strong>
+        {target.commitSha && <code>{shortSha(target.commitSha)}</code>}
+        <IconButton label="Close branch menu" onClick={onClose}>
+          <X size={13} />
+        </IconButton>
+      </div>
+      <div className="branch-context-menu-list">
+        {items.map((item) =>
+          item.type === "separator" ? (
+            <div key={item.key} className="branch-menu-separator" role="separator" />
+          ) : (
+            <button
+              key={`${item.action}-${item.label}`}
+              type="button"
+              role="menuitem"
+              className={clsx(item.danger && "danger")}
+              disabled={item.disabled}
+              title={item.hint}
+              onClick={() => onAction(item.action, target)}
+            >
+              <span>{item.label}</span>
+              {item.hint && <small>{item.hint}</small>}
+            </button>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BranchSwitcher({
+  branches,
+  query,
+  setQuery,
+  onSelect
+}: {
+  branches: DisplayBranch[];
+  query: string;
+  setQuery: (value: string) => void;
+  onSelect: (branch: DisplayBranch) => void;
+}) {
+  return (
+    <div className="branch-switcher" role="menu" aria-label="Switch branch">
+      <div className="branch-switcher-search">
+        <Search size={15} />
+        <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search branches" aria-label="Search branches" />
+      </div>
+      <div className="branch-switcher-list">
+        {branches.map((branch) => (
+          <button
+            key={branch.fullRef}
+            type="button"
+            role="menuitem"
+            className={clsx(branch.isCurrent && "active")}
+            disabled={branch.isUnborn || branch.isRemote}
+            onClick={() => onSelect(branch)}
+          >
+            <GitBranch size={14} />
+            <span>{branch.name}</span>
+            {branch.isCurrent && <small>current</small>}
+            {branch.isRemote && <small>remote</small>}
+          </button>
+        ))}
+        {branches.length === 0 && <EmptyState>No branches match</EmptyState>}
+      </div>
+    </div>
+  );
+}
+
+function ResizeHandle({
+  className,
+  label,
+  orientation,
+  onPointerDown
+}: {
+  className?: string;
+  label: string;
+  orientation: "horizontal" | "vertical";
+  onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={clsx("resize-handle", `resize-handle-${orientation}`, className)}
+      aria-label={label}
+      onPointerDown={onPointerDown}
+    />
+  );
+}
+
 function Sidebar({
   snapshot,
   branchName,
@@ -723,10 +1387,11 @@ function Sidebar({
   createBranch,
   addRemote,
   stashCurrent,
-  checkout,
   deleteBranch,
   applyStash,
-  dropStash
+  dropStash,
+  openBranchMenu,
+  startResize
 }: {
   snapshot: RepoSnapshot | null;
   branchName: string;
@@ -740,14 +1405,15 @@ function Sidebar({
   createBranch: () => void;
   addRemote: () => void;
   stashCurrent: () => void;
-  checkout: (name: string) => void;
   deleteBranch: (name: string) => void;
   applyStash: (stash: string) => void;
   dropStash: (stash: string) => void;
+  openBranchMenu: (target: BranchMenuTarget, event: ReactMouseEvent<HTMLElement>) => void;
+  startResize: (target: ResizeTarget, event: ReactPointerEvent) => void;
 }) {
   return (
     <aside className="sidebar">
-      <Panel title="Branches" actions={<GitBranch size={15} />}>
+      <Panel title="Branches" className="sidebar-branches-panel" actions={<GitBranch size={15} />}>
         <div className="inline-create">
           <input value={branchName} onChange={(event) => setBranchName(event.target.value)} aria-label="New branch name" />
           <IconButton label="Create branch" onClick={createBranch}>
@@ -758,7 +1424,11 @@ function Sidebar({
           {snapshot ? (
             displayBranches(snapshot).map((branch) => (
               <div key={branch.fullRef} className={clsx("nav-row", branch.isCurrent && "active")}>
-                <button onClick={() => checkout(branch.name)} disabled={branch.isUnborn || branch.isRemote}>
+                <button
+                  onClick={(event) => openBranchMenu(targetFromBranch(branch, "sidebar"), event)}
+                  aria-haspopup="menu"
+                  disabled={branch.isUnborn}
+                >
                   <ChevronRight size={13} />
                   <span>{branch.name}</span>
                   {branch.isUnborn && <small>unborn</small>}
@@ -776,8 +1446,14 @@ function Sidebar({
           )}
         </div>
       </Panel>
+      <ResizeHandle
+        className="sidebar-section-resize"
+        label="Resize branches section"
+        orientation="horizontal"
+        onPointerDown={(event) => startResize("sidebarBranches", event)}
+      />
 
-      <Panel title="Remotes" actions={<Boxes size={15} />}>
+      <Panel title="Remotes" className="sidebar-remotes-panel" actions={<Boxes size={15} />}>
         <div className="remote-create">
           <input value={remoteName} onChange={(event) => setRemoteName(event.target.value)} aria-label="Remote name" />
           <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} aria-label="Remote URL" placeholder="git@github.com:owner/repo.git" />
@@ -798,8 +1474,14 @@ function Sidebar({
           )}
         </div>
       </Panel>
+      <ResizeHandle
+        className="sidebar-section-resize"
+        label="Resize remotes section"
+        orientation="horizontal"
+        onPointerDown={(event) => startResize("sidebarRemotes", event)}
+      />
 
-      <Panel title="Stashes" actions={<PackageOpen size={15} />}>
+      <Panel title="Stashes" className="sidebar-stashes-panel" actions={<PackageOpen size={15} />}>
         <div className="inline-create">
           <input value={stashMessage} onChange={(event) => setStashMessage(event.target.value)} aria-label="Stash message" />
           <IconButton label="Create stash" onClick={stashCurrent}>
@@ -824,8 +1506,14 @@ function Sidebar({
           )}
         </div>
       </Panel>
+      <ResizeHandle
+        className="sidebar-section-resize"
+        label="Resize stashes section"
+        orientation="horizontal"
+        onPointerDown={(event) => startResize("sidebarStashes", event)}
+      />
 
-      <Panel title="Pull Requests" actions={<GitPullRequest size={15} />}>
+      <Panel title="Pull Requests" className="sidebar-pull-requests-panel" actions={<GitPullRequest size={15} />}>
         <EmptyState>GitHub adapter pending</EmptyState>
       </Panel>
     </aside>
@@ -835,10 +1523,22 @@ function Sidebar({
 function CommitGraphTable({
   rows,
   selectedSha,
+  snapshot,
+  commitMessage,
+  setCommitMessage,
+  stagedCount,
+  unstagedCount,
+  onOpenBranchMenu,
   onSelect
 }: {
   rows: GraphRow[];
   selectedSha?: string;
+  snapshot: RepoSnapshot | null;
+  commitMessage: string;
+  setCommitMessage: (value: string) => void;
+  stagedCount: number;
+  unstagedCount: number;
+  onOpenBranchMenu: (target: BranchMenuTarget, event: ReactMouseEvent<HTMLElement>) => void;
   onSelect: (commit: Commit) => void;
 }) {
   const visibleLaneCount = Math.min(maxVisibleGraphLanes, Math.max(4, Math.max(...rows.map((row) => row.maxLane), 1)));
@@ -856,19 +1556,63 @@ function CommitGraphTable({
         <span>Hash</span>
       </div>
       <div className="graph-history-body">
+        {snapshot && snapshot.changes.length > 0 && (
+          <div className="graph-commit-row graph-wip-row" style={{ "--row-color": "var(--warning)" } as CSSProperties} role="row">
+            <span className="branch-tag-cell">
+              <span className="ref-chip wip">WIP</span>
+            </span>
+            <span className="graph-cell graph-wip-cell" aria-hidden="true">
+              <span />
+            </span>
+            <span className="graph-message-cell wip-message-cell">
+              <input
+                value={commitMessage}
+                onChange={(event) => setCommitMessage(event.target.value)}
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+                placeholder="// WIP"
+                aria-label="Inline commit message"
+              />
+              <small>
+                {snapshot.changes.length} file{snapshot.changes.length === 1 ? "" : "s"} changed
+              </small>
+            </span>
+            <span className="graph-author-cell wip-counts">
+              {unstagedCount > 0 && <span>Unstaged {unstagedCount}</span>}
+              {stagedCount > 0 && <span>Staged {stagedCount}</span>}
+            </span>
+            <span className="graph-date-cell">{formatDateTime(new Date().toISOString())}</span>
+            <span className="graph-hash-cell">working</span>
+          </div>
+        )}
         {rows.map((row) => (
-          <button
+          <div
             key={row.commit.sha}
             className={clsx("graph-commit-row", selectedSha === row.commit.sha && "selected")}
             style={{ "--row-color": row.color } as CSSProperties}
+            role="button"
+            tabIndex={0}
             onClick={() => onSelect(row.commit)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onSelect(row.commit);
+              }
+            }}
           >
             <span className="branch-tag-cell">
               {row.refs.length > 0 ? (
                 row.refs.slice(0, 3).map((ref) => (
-                  <span key={`${row.commit.sha}-${ref.label}`} className={clsx("ref-chip", ref.kind)} style={{ "--ref-color": ref.color } as CSSProperties}>
+                  <button
+                    key={`${row.commit.sha}-${ref.label}`}
+                    className={clsx("ref-chip", ref.kind)}
+                    style={{ "--ref-color": ref.color } as CSSProperties}
+                    type="button"
+                    aria-haspopup="menu"
+                    onClick={(event) => onOpenBranchMenu(targetFromRef(ref, row.commit, snapshot), event)}
+                  >
                     {ref.label}
-                  </span>
+                  </button>
                 ))
               ) : (
                 <span className="ref-placeholder" />
@@ -882,7 +1626,7 @@ function CommitGraphTable({
             <span className="graph-author-cell">{row.commit.author}</span>
             <span className="graph-date-cell">{formatDateTime(row.commit.date)}</span>
             <span className="graph-hash-cell">{shortSha(row.commit.sha)}</span>
-          </button>
+          </div>
         ))}
       </div>
     </div>
@@ -1564,6 +2308,7 @@ function parseCommitRefs(refs: string[]): RefChip[] {
         return {
           label,
           kind,
+          raw: value,
           color: refColor(label, kind)
         };
       })
@@ -1608,7 +2353,204 @@ function statusLabel(change: { status: FileStatus }) {
   return "M";
 }
 
-function displayBranches(snapshot: RepoSnapshot) {
+function branchMenuItems(target: BranchMenuTarget, snapshot: RepoSnapshot | null): BranchMenuItem[] {
+  const currentBranch = snapshot?.currentBranch ?? "current branch";
+  const hasRemote = (snapshot?.remotes.length ?? 0) > 0;
+  const localBranch = !target.isRemote && !target.isTag && !target.isUnborn;
+  const branchRef = target.isTag ? "tag" : target.isRemote ? "remote branch" : "branch";
+  const canCheckout = target.isTag || (localBranch && !target.isCurrent);
+  const canMerge = !target.isCurrent && !target.isTag && !target.isUnborn;
+  const canRebase = !target.isCurrent && !target.isTag && !target.isUnborn;
+  const canDelete = localBranch && !target.isCurrent && !target.isProtected;
+
+  return [
+    {
+      type: "item",
+      action: "pull",
+      label: "Pull (fast-forward if possible)",
+      disabled: !target.isCurrent || target.isTag || target.isRemote,
+      hint: !target.isCurrent ? "checkout first" : undefined
+    },
+    {
+      type: "item",
+      action: "push",
+      label: "Push",
+      disabled: !localBranch || !hasRemote,
+      hint: !hasRemote ? "add remote first" : !localBranch ? `not a local ${branchRef}` : undefined
+    },
+    {
+      type: "item",
+      action: "set-upstream",
+      label: "Set Upstream",
+      disabled: !localBranch || !hasRemote,
+      hint: !hasRemote ? "add remote first" : !localBranch ? `not a local ${branchRef}` : undefined
+    },
+    { type: "separator", key: "integrate" },
+    {
+      type: "item",
+      action: "merge",
+      label: `Merge ${target.name} into ${currentBranch}`,
+      disabled: !canMerge,
+      hint: target.isCurrent ? "already checked out" : target.isTag ? "tags cannot be merged here" : undefined
+    },
+    {
+      type: "item",
+      action: "rebase",
+      label: `Rebase ${currentBranch} onto ${target.name}`,
+      disabled: !canRebase,
+      hint: target.isCurrent ? "already checked out" : target.isTag ? "tags cannot be rebased here" : undefined
+    },
+    { type: "separator", key: "checkout" },
+    {
+      type: "item",
+      action: "checkout",
+      label: target.isTag ? "Checkout tag" : "Checkout",
+      disabled: !canCheckout,
+      hint: target.isRemote ? "create local branch here" : target.isCurrent ? "already checked out" : undefined
+    },
+    { type: "item", action: "create-worktree", label: `Create worktree from ${target.name}`, disabled: true, hint: "post-MVP" },
+    { type: "separator", key: "commit" },
+    { type: "item", action: "create-branch", label: "Create branch here", disabled: target.isUnborn },
+    { type: "item", action: "cherry-pick", label: "Cherry pick commit", disabled: !target.commitSha },
+    { type: "item", action: "reset", label: `Reset ${currentBranch} to this commit`, disabled: true, hint: "destructive action pending" },
+    { type: "item", action: "revert", label: "Revert commit", disabled: !target.commitSha },
+    { type: "separator", key: "provider" },
+    { type: "item", action: "open-pr", label: `Start a pull request from ${target.name}`, disabled: true, hint: "GitHub adapter pending" },
+    { type: "item", action: "explain", label: "Explain Branch Changes (Preview)", disabled: true, hint: "AI adapter pending" },
+    { type: "separator", key: "manage" },
+    {
+      type: "item",
+      action: "rename",
+      label: `Rename ${target.name}`,
+      disabled: !localBranch,
+      hint: !localBranch ? `not a local ${branchRef}` : undefined
+    },
+    {
+      type: "item",
+      action: "delete",
+      label: `Delete ${target.name}`,
+      danger: true,
+      disabled: !canDelete,
+      hint: target.isCurrent ? "current branch" : target.isProtected ? "protected branch" : !localBranch ? `not a local ${branchRef}` : undefined
+    },
+    {
+      type: "item",
+      action: "delete-remote",
+      label: target.isRemote ? `Delete ${target.name}` : `Delete remote for ${target.name}`,
+      danger: true,
+      disabled: true,
+      hint: "remote delete pending"
+    },
+    { type: "separator", key: "copy" },
+    { type: "item", action: "copy-name", label: target.isTag ? "Copy tag name" : "Copy branch name" },
+    { type: "item", action: "copy-sha", label: "Copy commit sha", disabled: !target.commitSha },
+    { type: "item", action: "copy-branch-link", label: `Copy link to ${target.isTag ? "tag" : "branch"}`, disabled: true, hint: "provider URL pending" },
+    { type: "item", action: "copy-commit-link", label: "Copy link to this commit on remote", disabled: true, hint: "provider URL pending" },
+    { type: "separator", key: "patch" },
+    { type: "item", action: "create-patch", label: "Create patch from commit", disabled: true, hint: "post-MVP" },
+    { type: "item", action: "share-patch", label: "Share commit as Cloud Patch", disabled: true, hint: "post-MVP" },
+    { type: "separator", key: "view" },
+    { type: "item", action: "pin-left", label: "Pin to Left", disabled: true, hint: "post-MVP" },
+    { type: "item", action: "solo", label: "Solo", disabled: true, hint: "post-MVP" },
+    { type: "separator", key: "tags" },
+    { type: "item", action: "create-tag", label: "Create tag here", disabled: target.isUnborn },
+    { type: "item", action: "create-annotated-tag", label: "Create annotated tag here", disabled: target.isUnborn }
+  ];
+}
+
+function menuPendingLabel(action: BranchMenuAction) {
+  const labels: Record<BranchMenuAction, string> = {
+    pull: "Pull",
+    push: "Push",
+    "set-upstream": "Set upstream",
+    merge: "Merge",
+    rebase: "Rebase",
+    checkout: "Checkout",
+    "create-worktree": "Create worktree",
+    "create-branch": "Create branch",
+    "cherry-pick": "Cherry pick",
+    reset: "Reset branch",
+    revert: "Revert commit",
+    "open-pr": "Pull request creation",
+    explain: "Explain branch changes",
+    rename: "Rename branch",
+    delete: "Delete branch",
+    "delete-remote": "Delete remote branch",
+    "copy-name": "Copy name",
+    "copy-sha": "Copy SHA",
+    "copy-branch-link": "Copy branch link",
+    "copy-commit-link": "Copy commit link",
+    "create-patch": "Create patch",
+    "share-patch": "Share patch",
+    "pin-left": "Pin to Left",
+    solo: "Solo",
+    "create-tag": "Create tag",
+    "create-annotated-tag": "Create annotated tag"
+  };
+  return labels[action];
+}
+
+function targetFromBranch(branch: DisplayBranch, source: BranchMenuTarget["source"]): BranchMenuTarget {
+  return {
+    name: branch.name,
+    fullRef: branch.fullRef,
+    kind: branch.isRemote ? "remote" : branch.isCurrent ? "head" : "local",
+    source,
+    upstream: branch.upstream,
+    isCurrent: branch.isCurrent,
+    isProtected: branch.isProtected,
+    isRemote: branch.isRemote,
+    isTag: false,
+    isUnborn: branch.isUnborn
+  };
+}
+
+function targetFromRef(ref: RefChip, commit: Commit, snapshot: RepoSnapshot | null): BranchMenuTarget {
+  const branch = snapshot ? findBranchByName(snapshot, ref.label) : undefined;
+  const isTag = ref.kind === "tag";
+  const isRemote = ref.kind === "remote" || branch?.fullRef.startsWith("refs/remotes/") === true;
+
+  return {
+    name: ref.label,
+    fullRef: branch?.fullRef ?? ref.raw,
+    kind: ref.kind,
+    source: "graph",
+    commitSha: commit.sha,
+    upstream: branch?.upstream,
+    isCurrent: branch?.isCurrent ?? (snapshot?.currentBranch === ref.label && ref.kind !== "remote" && !isTag),
+    isProtected: branch?.isProtected ?? ["main", "master", "develop", "dev", "release"].includes(ref.label),
+    isRemote,
+    isTag,
+    isUnborn: false
+  };
+}
+
+function findBranchByName(snapshot: RepoSnapshot, name: string) {
+  return snapshot.branches.find((branch) => branch.name === name || branch.fullRef === name || normalizeRefLabel(branch.fullRef) === name);
+}
+
+function defaultBranchFromTarget(target: BranchMenuTarget) {
+  const normalized = target.name
+    .replace(/^origin\//, "")
+    .replace(/[^A-Za-z0-9._/-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized ? `${normalized}-work` : "new-branch";
+}
+
+function filterBranches(branches: DisplayBranch[], query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  const filtered = normalizedQuery
+    ? branches.filter((branch) => branch.name.toLowerCase().includes(normalizedQuery) || branch.upstream?.toLowerCase().includes(normalizedQuery))
+    : branches;
+
+  return [...filtered].sort((a, b) => {
+    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+    if (a.isRemote !== b.isRemote) return a.isRemote ? 1 : -1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function displayBranches(snapshot: RepoSnapshot): DisplayBranch[] {
   if (snapshot.branches.length > 0) {
     return snapshot.branches.map((branch) => ({
       ...branch,
@@ -1628,6 +2570,11 @@ function displayBranches(snapshot: RepoSnapshot) {
       isUnborn: true
     }
   ];
+}
+
+function repoNameFromPath(path: string) {
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed.split("/").filter(Boolean).at(-1) ?? "Open repository";
 }
 
 function shortSha(sha: string) {

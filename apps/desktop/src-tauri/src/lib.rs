@@ -213,6 +213,7 @@ struct BranchCreateRequest {
     repo_path: String,
     name: String,
     checkout: bool,
+    start_point: Option<String>,
 }
 
 #[tauri::command]
@@ -298,7 +299,12 @@ async fn git_commit(
 async fn git_branch_create(request: BranchCreateRequest) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&request.repo_path).await?;
     validate_ref_arg(&request.name, "branch name")?;
-    run_git(Some(&repo), vec!["branch".into(), request.name.clone()]).await?;
+    let mut args = vec!["branch".into(), request.name.clone()];
+    if let Some(start_point) = request.start_point.filter(|value| !value.trim().is_empty()) {
+        validate_ref_arg(&start_point, "branch start point")?;
+        args.push(start_point);
+    }
+    run_git(Some(&repo), args).await?;
     if request.checkout {
         run_git(Some(&repo), vec!["checkout".into(), request.name]).await?;
     }
@@ -327,6 +333,23 @@ async fn git_branch_delete(
 }
 
 #[tauri::command]
+async fn git_branch_rename(
+    repo_path: String,
+    old_name: String,
+    new_name: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&old_name, "branch name")?;
+    validate_ref_arg(&new_name, "new branch name")?;
+    run_git(
+        Some(&repo),
+        vec!["branch".into(), "-m".into(), old_name, new_name],
+    )
+    .await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
 async fn git_fetch(repo_path: String, remote: Option<String>) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     let mut args = vec!["fetch".into()];
@@ -342,6 +365,68 @@ async fn git_fetch(repo_path: String, remote: Option<String>) -> CommandResult<R
 async fn git_pull(repo_path: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     run_git(Some(&repo), vec!["pull".into()]).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_merge(repo_path: String, branch: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&branch, "branch name")?;
+    run_git(
+        Some(&repo),
+        vec!["merge".into(), "--no-edit".into(), branch],
+    )
+    .await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_rebase(repo_path: String, upstream: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&upstream, "upstream branch")?;
+    run_git(Some(&repo), vec!["rebase".into(), upstream]).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_cherry_pick(repo_path: String, commit_sha: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&commit_sha, "commit")?;
+    run_git(Some(&repo), vec!["cherry-pick".into(), commit_sha]).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_revert(repo_path: String, commit_sha: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&commit_sha, "commit")?;
+    run_git(
+        Some(&repo),
+        vec!["revert".into(), "--no-edit".into(), commit_sha],
+    )
+    .await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_tag_create(
+    repo_path: String,
+    name: String,
+    target: String,
+    message: Option<String>,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&name, "tag name")?;
+    validate_ref_arg(&target, "tag target")?;
+
+    let mut args = vec!["tag".into()];
+    if let Some(message_value) = message.filter(|value| !value.trim().is_empty()) {
+        args.extend(["-a".into(), name, target, "-m".into(), message_value]);
+    } else {
+        args.extend([name, target]);
+    }
+
+    run_git(Some(&repo), args).await?;
     build_snapshot(&repo, None).await
 }
 
@@ -864,8 +949,9 @@ fn parse_commits(raw: &str) -> Vec<Commit> {
     raw.split('\u{1e}')
         .filter(|entry| !entry.trim().is_empty())
         .filter_map(|entry| {
+            let entry = entry.trim_matches(['\n', '\r']);
             let mut parts = entry.split('\u{1f}');
-            let sha = parts.next()?.to_string();
+            let sha = parts.next()?.trim().to_string();
             let parents = parts
                 .next()
                 .unwrap_or_default()
@@ -1143,8 +1229,14 @@ pub fn run() {
             git_branch_create,
             git_branch_checkout,
             git_branch_delete,
+            git_branch_rename,
             git_fetch,
             git_pull,
+            git_merge,
+            git_rebase,
+            git_cherry_pick,
+            git_revert,
+            git_tag_create,
             git_push,
             git_remote_add,
             git_stash_push,
@@ -1216,6 +1308,24 @@ mod tests {
         assert!(changes[1].staged);
         assert!(!changes[1].unstaged);
         assert_eq!(changes[2].path, "docs/new.md");
+    }
+
+    #[test]
+    fn parses_commit_records_without_control_chars_in_sha() {
+        let raw = concat!(
+            "abc123%x1fparent1%x1fLogan%x1flogan@example.com%x1f2026-05-20T10:00:00-05:00%x1fFirst%x1fHEAD -> main%x1e",
+            "\n",
+            "def456%x1fabc123%x1fLogan%x1flogan@example.com%x1f2026-05-20T09:00:00-05:00%x1fSecond%x1forigin/main%x1e"
+        )
+        .replace("%x1f", "\u{1f}")
+        .replace("%x1e", "\u{1e}");
+
+        let commits = parse_commits(&raw);
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].sha, "abc123");
+        assert_eq!(commits[1].sha, "def456");
+        assert!(validate_ref_arg(&commits[1].sha, "commit").is_ok());
     }
 
     #[test]
