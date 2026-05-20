@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="OpenGit icon">
+  <rect width="1024" height="1024" rx="164" fill="#11110f"/>
+  <path d="M248 704V320c0-39.8 32.2-72 72-72h384c39.8 0 72 32.2 72 72v384c0 39.8-32.2 72-72 72H320c-39.8 0-72-32.2-72-72Z" fill="#181816" stroke="#5fc89d" stroke-width="40"/>
+  <path d="M344 514h336" stroke="#ece9df" stroke-width="58" stroke-linecap="round"/>
+  <path d="M512 346v336" stroke="#ece9df" stroke-width="58" stroke-linecap="round"/>
+  <circle cx="512" cy="512" r="92" fill="#5fc89d"/>
+  <circle cx="344" cy="514" r="56" fill="#d9aa50"/>
+  <circle cx="680" cy="514" r="56" fill="#e06a5f"/>
+</svg>

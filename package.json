@@ -1,0 +1,24 @@
+{
+  "name": "opengit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local-first cross-platform Git desktop client.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "workspaces": [
+    "apps/desktop",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace apps/desktop run tauri:dev",
+    "build": "npm --workspace apps/desktop run build",
+    "typecheck": "npm --workspaces --if-present run typecheck",
+    "test": "npm --workspaces --if-present run test",
+    "tauri:dev": "npm --workspace apps/desktop run tauri:dev",
+    "tauri:build": "npm --workspace apps/desktop run tauri:build"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  }
+}

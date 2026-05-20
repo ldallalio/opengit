@@ -1,0 +1,11 @@
+.DS_Store
+node_modules/
+dist/
+target/
+*.log
+.env
+.env.*
+!.env.example
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+fixtures/repos/generated/
