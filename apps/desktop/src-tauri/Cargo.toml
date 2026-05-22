@@ -3,6 +3,7 @@ name = "opengit-desktop"
 version = "0.1.0"
 description = "OpenGit desktop backend"
 authors = ["OpenGit"]
+license = "MIT"
 edition = "2021"
 
 [lib]

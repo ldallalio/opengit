@@ -1,36 +1,128 @@
 # OpenGit
 
-OpenGit is a local-first Git desktop client built as an original product, not a clone of any commercial Git GUI. The first vertical slice uses Tauri, React, TypeScript, and Rust to open local repositories, inspect status/history, stage files, and create commits through the native `git` CLI.
+OpenGit is a local-first, cross-platform Git desktop client built with Tauri, React, TypeScript, and Rust.
 
-## Current MVP
+It is an original open-source project for developers who want a polished Git GUI for everyday local repository work without a subscription. OpenGit is not affiliated with, endorsed by, or derived from GitKraken or any other commercial Git client.
 
-- Open a local repository by path.
-- Inspect branch, upstream, ahead/behind, remotes, stashes, file status, and recent commit history.
-- Stage, unstage, and discard file changes with backend path validation.
-- Create commits or amend the current commit.
-- Run fetch, pull, push, branch, and stash actions through safe Rust command handlers.
-- Use a dense, keyboard-friendly desktop layout with light and dark themes.
+> Status: alpha. OpenGit is usable for local workflows, but it is not production-stable yet and signed binary releases are not available.
 
-## Development
+## Features
 
-Prerequisites:
+- Open repositories with a native folder picker.
+- Switch between recent repositories with top-level repo tabs.
+- View branches, remotes, stashes, worktree status, and commit history.
+- Render a capped linked commit graph across branches.
+- Filter history by commit type, author, and date order.
+- Stage, unstage, stage all, unstage all, and discard file changes.
+- Commit, amend the HEAD commit message, and generate commit messages with an optional OpenAI API key.
+- Fetch, pull, push, force-with-lease, create branches, checkout branches, delete branches, rename branches, merge, rebase, cherry-pick, revert, and tag.
+- Detect non-fast-forward push failures and offer recovery actions.
+- Resolve merge/rebase/cherry-pick conflicts with current, incoming, and result panes.
+- Review commit file lists and side-by-side diffs.
+- Store OpenAI API keys and Azure DevOps PATs in the operating system keychain.
+- Use Azure DevOps HTTPS remotes without embedding tokens in remote URLs.
+
+## Platforms
+
+OpenGit is designed for:
+
+- macOS
+- Windows
+- Linux
+
+Current development and day-to-day verification happen primarily on macOS. CI builds and tests the source on macOS, Windows, and Linux where possible, but signed installers are not published yet.
+
+## Screenshots
+
+Screenshots are intentionally not committed yet. Add original OpenGit screenshots only; do not use reference screenshots from commercial Git clients.
+
+## Requirements
 
 - Node.js 22+
 - npm 10+
-- Rust toolchain with Cargo
-- native `git`
+- Rust stable toolchain with Cargo
+- Native `git` available on `PATH`
 
-Commands:
+Linux development also needs the native Tauri/WebKit build dependencies for your distribution.
+
+## Development
+
+Install dependencies:
 
 ```sh
 npm install
-npm run typecheck
-npm run build
+```
+
+Run the desktop app:
+
+```sh
 npm run tauri:dev
 ```
 
-The browser-only Vite build includes demo data when it is not running inside Tauri. Real Git operations require the Tauri app runtime.
+Run the browser preview with demo data:
 
-## Legal Guardrails
+```sh
+npm --workspace apps/desktop run dev
+```
 
-OpenGit must remain visually and legally distinct from GitKraken and other commercial Git clients. Do not copy product names, branding, iconography, screenshots, proprietary UI copy, artwork, layouts, or pixel-level design.
+Run checks:
+
+```sh
+npm run typecheck
+npm run build
+npm run test
+```
+
+Run the full local check used before opening pull requests:
+
+```sh
+npm run check
+```
+
+## Project Layout
+
+```text
+apps/desktop/          React/Vite frontend and Tauri Rust backend
+packages/core/         Shared TypeScript domain models
+packages/ui/           Shared React UI primitives
+docs/                  Architecture, product, and threat-model notes
+assets/                Original OpenGit assets
+```
+
+## Security Model
+
+- Git commands are executed through argv arrays, not shell strings.
+- Repository paths are canonicalized before Git operations.
+- File operations validate repository-relative paths.
+- Credentials are stored in the OS keychain:
+  - macOS Keychain
+  - Windows Credential Manager
+  - Linux Secret Service-compatible keyring
+- Tokens are not stored in localStorage or remote URLs.
+- Logs and error messages are redacted before display.
+
+Read [SECURITY.md](SECURITY.md) before reporting vulnerabilities.
+
+## Legal And Design Guardrails
+
+OpenGit must remain visually and legally distinct from GitKraken and other commercial Git clients.
+
+Do not copy:
+
+- product names or branding
+- proprietary icons, screenshots, artwork, or marketing copy
+- pixel-perfect layouts
+- proprietary UI text
+- bundled commercial assets
+
+It is fine to implement standard Git concepts and common developer workflows, but the interaction design, visual language, assets, and copy must remain original to OpenGit.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+OpenGit is released under the [MIT License](LICENSE).
+
+Third-party dependency notes are tracked in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

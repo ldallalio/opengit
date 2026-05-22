@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest an OpenGit workflow or product improvement.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow
+      description: What Git workflow or developer task should this improve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the behavior in OpenGit terms. Do not attach copied screenshots from commercial products.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches would work?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - History and graph
+        - Changes and diffs
+        - Branches and remotes
+        - Conflict resolution
+        - Pull requests and providers
+        - Settings and integrations
+        - Packaging and updates
+        - Other

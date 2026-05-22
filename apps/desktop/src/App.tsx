@@ -12,8 +12,6 @@ import { Button, EmptyState, IconButton, Panel } from "@opengit/ui";
 import {
   AlertTriangle,
   ArrowDownToLine,
-  ArrowUpFromLine,
-  Bell,
   Boxes,
   Check,
   ChevronDown,
@@ -21,9 +19,7 @@ import {
   ClipboardList,
   Code2,
   FileText,
-  FlaskConical,
   FolderOpen,
-  Github,
   GitBranch,
   GitCommitHorizontal,
   GitFork,
@@ -39,7 +35,6 @@ import {
   RefreshCw,
   Search,
   Settings,
-  ShieldCheck,
   Shuffle,
   Sparkles,
   SquarePen,
@@ -47,8 +42,6 @@ import {
   Terminal,
   Trash2,
   UploadCloud,
-  UsersRound,
-  Wrench,
   X
 } from "lucide-react";
 import { clsx } from "clsx";
@@ -2939,66 +2932,65 @@ function PreferencesPanel({
     ? `Status: ${azureDevOpsConfigured ? "PAT configured" : "No PAT saved"}. The token is injected only into Git child processes for Azure DevOps HTTPS remotes.`
     : "Status: Browser preview cannot save secure Azure DevOps tokens. Open the Tauri desktop window to store the PAT in the operating system keychain.";
 
+  const availableIntegrations: Array<{ label: string; icon: typeof Settings }> = [
+    { label: "OpenAI", icon: Sparkles },
+    { label: "Azure DevOps", icon: Link2 }
+  ];
+
   useEffect(() => {
-    setIntegration(preferredIntegration);
+    setIntegration(availableIntegrations.some((item) => item.label === preferredIntegration) ? preferredIntegration : "OpenAI");
   }, [preferredIntegration]);
   const sections: Array<{ id: PreferenceSection; label: string; icon: typeof Settings }> = [
     { id: "general", label: "General", icon: Settings },
     { id: "repositories", label: "Repositories", icon: FolderOpen },
-    { id: "profiles", label: "Profiles", icon: UsersRound },
-    { id: "ssh", label: "SSH", icon: ShieldCheck },
-    { id: "integrations", label: "Integrations", icon: Plug },
-    { id: "externalTools", label: "External Tools", icon: Wrench },
-    { id: "notifications", label: "Notifications", icon: Bell },
-    { id: "commit", label: "Commit", icon: GitCommitHorizontal },
-    { id: "editor", label: "Editor", icon: FileText },
-    { id: "terminal", label: "In-App Terminal", icon: Terminal },
-    { id: "experimental", label: "Experimental", icon: FlaskConical }
+    { id: "integrations", label: "Integrations", icon: Plug }
   ];
+  const activeSectionTitle = titleForPreferenceSection(section);
 
   return (
     <div className="preferences-backdrop" role="dialog" aria-modal="true" aria-label="Preferences">
-      <aside className="preferences-nav">
-        <button className="preferences-exit" onClick={close}>
-          <ArrowUpFromLine size={18} />
-          Exit Preferences
-        </button>
-
-        <div className="profile-block">
-          <span>Current profile</span>
+      <header className="preferences-header">
+        <div className="preferences-heading">
+          <span>
+            <Settings size={16} />
+            OpenGit Settings
+          </span>
+          <strong>{activeSectionTitle}</strong>
+        </div>
+        <div className="preferences-context">
           <div className="profile-card">
             <strong>LD</strong>
             <span>Default Profile</span>
           </div>
-        </div>
-
-        <div className="preferences-nav-group">
-          <span>Preferences</span>
-          {sections.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.id}
-                className={clsx("preference-nav-item", section === item.id && "active")}
-                onClick={() => setSection(item.id)}
-              >
-                <Icon size={17} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="preferences-nav-group repo-specific">
-          <span>Repo-Specific Preferences</span>
-          <button className="preference-nav-item" onClick={() => setSection("repositories")}>
-            <FolderOpen size={16} />
-            <span>{snapshot ? `Repo: ${snapshot.repository.name}` : "No repo open"}</span>
+          <button className="preferences-repo-chip" onClick={() => setSection("repositories")}>
+            <FolderOpen size={14} />
+            <span>{snapshot ? snapshot.repository.name : "No repo open"}</span>
+          </button>
+          <button className="preferences-exit" onClick={close}>
+            <X size={15} />
+            Close
           </button>
         </div>
-      </aside>
+      </header>
 
-      <section className="preferences-content">
+      <nav className="preferences-tabs" aria-label="Settings sections">
+        {sections.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button
+              key={item.id}
+              className={clsx("preference-tab", section === item.id && "active")}
+              onClick={() => setSection(item.id)}
+              aria-pressed={section === item.id}
+            >
+              <Icon size={14} />
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
+      </nav>
+
+      <main className="preferences-content">
         {section === "general" && (
           <PreferenceSection title="General">
             <SettingRow label="Theme" description="Controls the local OpenGit interface only.">
@@ -3057,16 +3049,7 @@ function PreferencesPanel({
           <PreferenceSection title="Integrations">
             <div className="integration-layout">
               <div className="integration-list">
-                {[
-                  { label: "OpenAI", icon: Sparkles },
-                  { label: "GitHub", icon: Github },
-                  { label: "GitHub Enterprise Server", icon: Github },
-                  { label: "GitLab", icon: GitFork },
-                  { label: "Bitbucket", icon: Boxes },
-                  { label: "Azure DevOps", icon: Link2 },
-                  { label: "Jira Cloud", icon: ClipboardList },
-                  { label: "Trello", icon: ClipboardList }
-                ].map(({ label, icon: Icon }) => (
+                {availableIntegrations.map(({ label, icon: Icon }) => (
                   <button key={label} className={clsx(integration === label && "active")} onClick={() => setIntegration(label)}>
                     <Icon size={16} />
                     <span>{label}</span>
@@ -3087,66 +3070,68 @@ function PreferencesPanel({
                         disabled={!runningInTauri}
                         aria-label="OpenAI API key"
                       />
-                      <Button
-                        variant="primary"
-                        disabled={!runningInTauri || openAiBusy || !openAiKey.trim()}
-                        onClick={async () => {
-                          setOpenAiBusy(true);
-                          setOpenAiMessage(null);
-                          try {
-                            const status = await saveOpenAiApiKey(openAiKey);
-                            setOpenAiConfigured(status.configured);
-                            setOpenAiKey("");
-                            setOpenAiMessage("OpenAI API key saved.");
-                          } catch (error) {
-                            setOpenAiMessage(error instanceof Error ? error.message : String(error));
-                          } finally {
-                            setOpenAiBusy(false);
-                          }
-                        }}
-                      >
-                        Save Key
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        disabled={!runningInTauri || openAiBusy}
-                        onClick={async () => {
-                          setOpenAiBusy(true);
-                          setOpenAiMessage(null);
-                          try {
-                            const result = await testOpenAiApiKey();
-                            if (result.configured) {
-                              setOpenAiConfigured(true);
+                      <div className="secret-actions">
+                        <Button
+                          variant="primary"
+                          disabled={!runningInTauri || openAiBusy || !openAiKey.trim()}
+                          onClick={async () => {
+                            setOpenAiBusy(true);
+                            setOpenAiMessage(null);
+                            try {
+                              const status = await saveOpenAiApiKey(openAiKey);
+                              setOpenAiConfigured(status.configured);
+                              setOpenAiKey("");
+                              setOpenAiMessage("OpenAI API key saved.");
+                            } catch (error) {
+                              setOpenAiMessage(error instanceof Error ? error.message : String(error));
+                            } finally {
+                              setOpenAiBusy(false);
                             }
-                            setOpenAiMessage(result.message);
-                          } catch (error) {
-                            setOpenAiMessage(error instanceof Error ? error.message : String(error));
-                          } finally {
-                            setOpenAiBusy(false);
-                          }
-                        }}
-                      >
-                        Test Key
-                      </Button>
-                      <Button
-                        variant="danger"
-                        disabled={!runningInTauri || openAiBusy || !openAiConfigured}
-                        onClick={async () => {
-                          setOpenAiBusy(true);
-                          setOpenAiMessage(null);
-                          try {
-                            const status = await clearOpenAiApiKey();
-                            setOpenAiConfigured(status.configured);
-                            setOpenAiMessage("OpenAI API key removed.");
-                          } catch (error) {
-                            setOpenAiMessage(error instanceof Error ? error.message : String(error));
-                          } finally {
-                            setOpenAiBusy(false);
-                          }
-                        }}
-                      >
-                        Remove
-                      </Button>
+                          }}
+                        >
+                          Save Key
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          disabled={!runningInTauri || openAiBusy}
+                          onClick={async () => {
+                            setOpenAiBusy(true);
+                            setOpenAiMessage(null);
+                            try {
+                              const result = await testOpenAiApiKey();
+                              if (result.configured) {
+                                setOpenAiConfigured(true);
+                              }
+                              setOpenAiMessage(result.message);
+                            } catch (error) {
+                              setOpenAiMessage(error instanceof Error ? error.message : String(error));
+                            } finally {
+                              setOpenAiBusy(false);
+                            }
+                          }}
+                        >
+                          Test Key
+                        </Button>
+                        <Button
+                          variant="danger"
+                          disabled={!runningInTauri || openAiBusy || !openAiConfigured}
+                          onClick={async () => {
+                            setOpenAiBusy(true);
+                            setOpenAiMessage(null);
+                            try {
+                              const status = await clearOpenAiApiKey();
+                              setOpenAiConfigured(status.configured);
+                              setOpenAiMessage("OpenAI API key removed.");
+                            } catch (error) {
+                              setOpenAiMessage(error instanceof Error ? error.message : String(error));
+                            } finally {
+                              setOpenAiBusy(false);
+                            }
+                          }}
+                        >
+                          Remove
+                        </Button>
+                      </div>
                     </div>
                   </SettingRow>
                   <SettingRow label="Model" description="Used for commit summary generation. The default follows the current small GPT-5 model family.">
@@ -3169,45 +3154,47 @@ function PreferencesPanel({
                         disabled={!runningInTauri}
                         aria-label="Azure DevOps personal access token"
                       />
-                      <Button
-                        variant="primary"
-                        disabled={!runningInTauri || azureDevOpsBusy || !azureDevOpsPat.trim()}
-                        onClick={async () => {
-                          setAzureDevOpsBusy(true);
-                          setAzureDevOpsMessage(null);
-                          try {
-                            const status = await saveAzureDevOpsPat(azureDevOpsPat);
-                            setAzureDevOpsConfigured(status.configured);
-                            setAzureDevOpsPat("");
-                            setAzureDevOpsMessage("Azure DevOps PAT saved.");
-                          } catch (error) {
-                            setAzureDevOpsMessage(error instanceof Error ? error.message : String(error));
-                          } finally {
-                            setAzureDevOpsBusy(false);
-                          }
-                        }}
-                      >
-                        Save PAT
-                      </Button>
-                      <Button
-                        variant="danger"
-                        disabled={!runningInTauri || azureDevOpsBusy || !azureDevOpsConfigured}
-                        onClick={async () => {
-                          setAzureDevOpsBusy(true);
-                          setAzureDevOpsMessage(null);
-                          try {
-                            const status = await clearAzureDevOpsPat();
-                            setAzureDevOpsConfigured(status.configured);
-                            setAzureDevOpsMessage("Azure DevOps PAT removed.");
-                          } catch (error) {
-                            setAzureDevOpsMessage(error instanceof Error ? error.message : String(error));
-                          } finally {
-                            setAzureDevOpsBusy(false);
-                          }
-                        }}
-                      >
-                        Remove
-                      </Button>
+                      <div className="secret-actions">
+                        <Button
+                          variant="primary"
+                          disabled={!runningInTauri || azureDevOpsBusy || !azureDevOpsPat.trim()}
+                          onClick={async () => {
+                            setAzureDevOpsBusy(true);
+                            setAzureDevOpsMessage(null);
+                            try {
+                              const status = await saveAzureDevOpsPat(azureDevOpsPat);
+                              setAzureDevOpsConfigured(status.configured);
+                              setAzureDevOpsPat("");
+                              setAzureDevOpsMessage("Azure DevOps PAT saved.");
+                            } catch (error) {
+                              setAzureDevOpsMessage(error instanceof Error ? error.message : String(error));
+                            } finally {
+                              setAzureDevOpsBusy(false);
+                            }
+                          }}
+                        >
+                          Save PAT
+                        </Button>
+                        <Button
+                          variant="danger"
+                          disabled={!runningInTauri || azureDevOpsBusy || !azureDevOpsConfigured}
+                          onClick={async () => {
+                            setAzureDevOpsBusy(true);
+                            setAzureDevOpsMessage(null);
+                            try {
+                              const status = await clearAzureDevOpsPat();
+                              setAzureDevOpsConfigured(status.configured);
+                              setAzureDevOpsMessage("Azure DevOps PAT removed.");
+                            } catch (error) {
+                              setAzureDevOpsMessage(error instanceof Error ? error.message : String(error));
+                            } finally {
+                              setAzureDevOpsBusy(false);
+                            }
+                          }}
+                        >
+                          Remove
+                        </Button>
+                      </div>
                     </div>
                   </SettingRow>
                   <div className="settings-note">{azureDevOpsStatusMessage}</div>
@@ -3240,7 +3227,7 @@ function PreferencesPanel({
             </div>
           </PreferenceSection>
         )}
-      </section>
+      </main>
     </div>
   );
 }

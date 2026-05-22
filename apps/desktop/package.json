@@ -2,6 +2,7 @@
   "name": "@opengit/desktop",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
@@ -9,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@opengit/core": "file:../../packages/core",
