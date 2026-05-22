@@ -1,7 +1,36 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { CommitFile, RepoSnapshot } from "@opengit/core";
 import { demoCommitFiles, demoDiff, demoSnapshot } from "./demo";
+
+export type OpenAiStatus = {
+  configured: boolean;
+};
+
+export type AzureDevOpsStatus = {
+  configured: boolean;
+};
+
+export type OpenAiTestResult = {
+  configured: boolean;
+  ok: boolean;
+  message: string;
+};
+
+export type AiCommitSuggestion = {
+  summary: string;
+  description: string;
+};
+
+export type ConflictVersions = {
+  path: string;
+  base: string;
+  ours: string;
+  theirs: string;
+  working: string;
+};
+
+export type ConflictStrategy = "ours" | "theirs" | "both";
 
 export class OpenGitApiError extends Error {
   code: string;
@@ -15,7 +44,10 @@ export class OpenGitApiError extends Error {
   }
 }
 
-export const isTauriRuntime = () => Boolean(window.__TAURI_INTERNALS__);
+export const isTauriRuntime = () => {
+  const internals = window.__TAURI_INTERNALS__ as { invoke?: unknown } | undefined;
+  return isTauri() || typeof internals?.invoke === "function";
+};
 
 async function call<T>(command: string, args: Record<string, unknown>, fallback: T): Promise<T> {
   if (!isTauriRuntime()) {
@@ -73,10 +105,42 @@ export const discardPaths = (repoPath: string, paths: string[]) =>
 export const commit = (repoPath: string, message: string, amend: boolean) =>
   call<RepoSnapshot>("git_commit", { repoPath, message, amend }, demoSnapshot);
 
+export const updateCommitMessage = (repoPath: string, commitSha: string, message: string) =>
+  call<RepoSnapshot>("git_commit_message_update", { repoPath, commitSha, message }, demoSnapshot);
+
+export const getOpenAiStatus = () => call<OpenAiStatus>("ai_openai_status", {}, { configured: false });
+
+export const saveOpenAiApiKey = (apiKey: string) => call<OpenAiStatus>("ai_openai_save_api_key", { apiKey }, { configured: false });
+
+export const clearOpenAiApiKey = () => call<OpenAiStatus>("ai_openai_clear_api_key", {}, { configured: false });
+
+export const testOpenAiApiKey = () =>
+  call<OpenAiTestResult>("ai_openai_test_api_key", {}, { configured: false, ok: false, message: "Desktop mode is required to test secure OpenAI keys." });
+
+export const getAzureDevOpsStatus = () => call<AzureDevOpsStatus>("azure_devops_status", {}, { configured: false });
+
+export const saveAzureDevOpsPat = (pat: string) => call<AzureDevOpsStatus>("azure_devops_save_pat", { pat }, { configured: false });
+
+export const clearAzureDevOpsPat = () => call<AzureDevOpsStatus>("azure_devops_clear_pat", {}, { configured: false });
+
+export const generateAiCommitMessage = (repoPath: string, model?: string) =>
+  call<AiCommitSuggestion>(
+    "ai_commit_message_generate",
+    { repoPath, model },
+    {
+      summary: "feat: summarize staged OpenGit changes",
+      description: "Generated preview based on staged files. Desktop mode sends the staged diff to OpenAI."
+    }
+  );
+
 export const fetchRepo = (repoPath: string, remote?: string) =>
   call<RepoSnapshot>("git_fetch", { repoPath, remote }, demoSnapshot);
 
 export const pullRepo = (repoPath: string) => call<RepoSnapshot>("git_pull", { repoPath }, demoSnapshot);
+
+export const pullRepoFastForward = (repoPath: string) => call<RepoSnapshot>("git_pull_fast_forward", { repoPath }, demoSnapshot);
+
+export const pullRepoRebase = (repoPath: string) => call<RepoSnapshot>("git_pull_rebase", { repoPath }, demoSnapshot);
 
 export const pushRepo = (repoPath: string, remote?: string, branch?: string, forceWithLease = false, setUpstream = false) =>
   call<RepoSnapshot>("git_push", { repoPath, remote, branch, forceWithLease, setUpstream }, demoSnapshot);
@@ -128,3 +192,18 @@ export const getCommitFiles = (repoPath: string, sha: string) =>
 
 export const getCommitFileDiff = (repoPath: string, sha: string, path: string, oldPath?: string) =>
   call<string>("git_commit_file_diff", { repoPath, sha, path, oldPath }, demoDiff);
+
+export const getConflictVersions = (repoPath: string, path: string) =>
+  call<ConflictVersions>("git_conflict_versions", { repoPath, path }, { path, base: "", ours: "", theirs: "", working: "" });
+
+export const resolveConflict = (repoPath: string, path: string, strategy: ConflictStrategy) =>
+  call<RepoSnapshot>("git_conflict_resolve", { repoPath, path, strategy }, demoSnapshot);
+
+export const markConflictResolved = (repoPath: string, path: string) =>
+  call<RepoSnapshot>("git_conflict_mark_resolved", { repoPath, path }, demoSnapshot);
+
+export const continueGitOperation = (repoPath: string) =>
+  call<RepoSnapshot>("git_operation_continue", { repoPath }, demoSnapshot);
+
+export const abortGitOperation = (repoPath: string) =>
+  call<RepoSnapshot>("git_operation_abort", { repoPath }, demoSnapshot);

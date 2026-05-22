@@ -1,4 +1,7 @@
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::{
     collections::BTreeMap,
     path::{Component, Path, PathBuf},
@@ -11,6 +14,11 @@ type CommandResult<T> = Result<T, AppError>;
 const DEFAULT_HISTORY_LIMIT: u32 = 250;
 const MIN_HISTORY_LIMIT: u32 = 50;
 const MAX_HISTORY_LIMIT: u32 = 2_000;
+const OPENAI_KEY_SERVICE: &str = "OpenGit";
+const OPENAI_KEY_ACCOUNT: &str = "openai-api-key";
+const AZURE_DEVOPS_PAT_ACCOUNT: &str = "azure-devops-pat";
+const DEFAULT_OPENAI_MODEL: &str = "gpt-5-mini";
+const MAX_STAGED_DIFF_CHARS: usize = 48_000;
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -18,8 +26,18 @@ enum AppError {
     InvalidInput { code: &'static str, message: String },
     #[error("Git command failed")]
     GitFailed { message: String, detail: String },
+    #[error("{message}")]
+    GitActionRequired {
+        code: &'static str,
+        message: String,
+        detail: String,
+    },
     #[error("I/O error: {0}")]
     Io(String),
+    #[error("Secure storage error: {0}")]
+    SecureStorage(String),
+    #[error("OpenAI request failed")]
+    AiFailed { message: String, detail: String },
 }
 
 impl Serialize for AppError {
@@ -45,10 +63,29 @@ impl Serialize for AppError {
                 message: message.clone(),
                 detail: Some(redact_secrets(detail)),
             },
+            AppError::GitActionRequired {
+                code,
+                message,
+                detail,
+            } => ErrorBody {
+                code,
+                message: message.clone(),
+                detail: Some(redact_secrets(detail)),
+            },
             AppError::Io(message) => ErrorBody {
                 code: "IO_ERROR",
                 message: message.clone(),
                 detail: None,
+            },
+            AppError::SecureStorage(message) => ErrorBody {
+                code: "SECURE_STORAGE_ERROR",
+                message: message.clone(),
+                detail: None,
+            },
+            AppError::AiFailed { message, detail } => ErrorBody {
+                code: "OPENAI_FAILED",
+                message: message.clone(),
+                detail: Some(redact_secrets(detail)),
             },
         };
 
@@ -93,6 +130,14 @@ enum WorktreeState {
     Rebasing,
     CherryPicking,
     Detached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitOperationState {
+    None,
+    Merging,
+    Rebasing,
+    CherryPicking,
 }
 
 #[derive(Debug, Serialize)]
@@ -185,6 +230,16 @@ struct Conflict {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ConflictVersions {
+    path: String,
+    base: String,
+    ours: String,
+    theirs: String,
+    working: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RepoSnapshot {
     repository: Repository,
     current_branch: Option<String>,
@@ -214,6 +269,52 @@ struct BranchCreateRequest {
     name: String,
     checkout: bool,
     start_point: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenAiStatus {
+    configured: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AzureDevOpsStatus {
+    configured: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenAiTestResult {
+    configured: bool,
+    ok: bool,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiCommitSuggestion {
+    summary: String,
+    description: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponseBody {
+    status: Option<String>,
+    incomplete_details: Option<OpenAiIncompleteDetails>,
+    output_text: Option<String>,
+    output: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiIncompleteDetails {
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiCommitSuggestionWire {
+    summary: String,
+    description: Option<String>,
 }
 
 #[tauri::command]
@@ -296,6 +397,233 @@ async fn git_commit(
 }
 
 #[tauri::command]
+async fn git_commit_message_update(
+    repo_path: String,
+    commit_sha: String,
+    message: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&commit_sha, "commit")?;
+    if message.trim().is_empty() {
+        return invalid("INVALID_COMMIT_MESSAGE", "Commit message is required.");
+    }
+
+    let head = run_git(Some(&repo), vec!["rev-parse".into(), "HEAD".into()]).await?;
+    if head.trim() != commit_sha.trim() {
+        return invalid(
+            "UNSUPPORTED_REWRITE",
+            "Only the HEAD commit message can be updated safely right now.",
+        );
+    }
+
+    let staged = run_git(
+        Some(&repo),
+        vec![
+            "diff".into(),
+            "--cached".into(),
+            "--name-only".into(),
+            "-z".into(),
+        ],
+    )
+    .await?;
+    if !staged.is_empty() {
+        return invalid(
+            "STAGED_CHANGES_BLOCK_AMEND",
+            "Unstage files before updating the HEAD commit message.",
+        );
+    }
+
+    run_git(
+        Some(&repo),
+        vec!["commit".into(), "--amend".into(), "-m".into(), message],
+    )
+    .await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn ai_openai_status() -> CommandResult<OpenAiStatus> {
+    Ok(OpenAiStatus {
+        configured: read_openai_api_key()?.is_some(),
+    })
+}
+
+#[tauri::command]
+async fn ai_openai_test_api_key() -> CommandResult<OpenAiTestResult> {
+    let Some(api_key) = read_openai_api_key()? else {
+        return Ok(OpenAiTestResult {
+            configured: false,
+            ok: false,
+            message: "No OpenAI API key is saved.".to_string(),
+        });
+    };
+
+    let response = reqwest::Client::new()
+        .get("https://api.openai.com/v1/models")
+        .bearer_auth(api_key)
+        .send()
+        .await;
+
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_default();
+            if status.is_success() {
+                Ok(OpenAiTestResult {
+                    configured: true,
+                    ok: true,
+                    message: "OpenAI API key is saved and reachable.".to_string(),
+                })
+            } else {
+                Ok(OpenAiTestResult {
+                    configured: true,
+                    ok: false,
+                    message: format!(
+                        "OpenAI returned HTTP {status}: {}",
+                        openai_error_message(&body_text)
+                    ),
+                })
+            }
+        }
+        Err(error) => Ok(OpenAiTestResult {
+            configured: true,
+            ok: false,
+            message: format!("Could not reach OpenAI: {error}"),
+        }),
+    }
+}
+
+#[tauri::command]
+async fn ai_openai_save_api_key(api_key: String) -> CommandResult<OpenAiStatus> {
+    let value = api_key.trim();
+    if value.is_empty() {
+        return invalid("INVALID_OPENAI_KEY", "OpenAI API key is required.");
+    }
+    if value.chars().any(|ch| ch.is_control()) {
+        return invalid(
+            "INVALID_OPENAI_KEY",
+            "OpenAI API key contains unsafe characters.",
+        );
+    }
+
+    let entry = openai_key_entry()?;
+    entry.set_password(value).map_err(map_keyring_error)?;
+    let saved = entry.get_password().map_err(map_keyring_error)?;
+    if saved != value {
+        return invalid(
+            "OPENAI_KEY_VERIFY_FAILED",
+            "OpenAI API key could not be verified after saving.",
+        );
+    }
+    if read_openai_api_key()?.as_deref() != Some(value) {
+        return invalid(
+            "OPENAI_KEY_VERIFY_FAILED",
+            "OpenAI API key was saved but could not be read through the normal status path.",
+        );
+    }
+    Ok(OpenAiStatus { configured: true })
+}
+
+#[tauri::command]
+async fn ai_openai_clear_api_key() -> CommandResult<OpenAiStatus> {
+    let entry = openai_key_entry()?;
+    match entry.delete_credential() {
+        Ok(_) | Err(KeyringError::NoEntry) => Ok(OpenAiStatus { configured: false }),
+        Err(error) => Err(map_keyring_error(error)),
+    }
+}
+
+#[tauri::command]
+async fn azure_devops_status() -> CommandResult<AzureDevOpsStatus> {
+    Ok(AzureDevOpsStatus {
+        configured: read_azure_devops_pat()?.is_some(),
+    })
+}
+
+#[tauri::command]
+async fn azure_devops_save_pat(pat: String) -> CommandResult<AzureDevOpsStatus> {
+    let value = pat.trim();
+    if value.is_empty() {
+        return invalid("INVALID_AZURE_DEVOPS_PAT", "Azure DevOps PAT is required.");
+    }
+    if value.chars().any(|ch| ch.is_control()) {
+        return invalid(
+            "INVALID_AZURE_DEVOPS_PAT",
+            "Azure DevOps PAT contains unsafe characters.",
+        );
+    }
+
+    let entry = azure_devops_pat_entry()?;
+    entry.set_password(value).map_err(map_keyring_error)?;
+    if read_azure_devops_pat()?.as_deref() != Some(value) {
+        return invalid(
+            "AZURE_DEVOPS_PAT_VERIFY_FAILED",
+            "Azure DevOps PAT was saved but could not be read through the normal status path.",
+        );
+    }
+    Ok(AzureDevOpsStatus { configured: true })
+}
+
+#[tauri::command]
+async fn azure_devops_clear_pat() -> CommandResult<AzureDevOpsStatus> {
+    let entry = azure_devops_pat_entry()?;
+    match entry.delete_credential() {
+        Ok(_) | Err(KeyringError::NoEntry) => Ok(AzureDevOpsStatus { configured: false }),
+        Err(error) => Err(map_keyring_error(error)),
+    }
+}
+
+#[tauri::command]
+async fn ai_commit_message_generate(
+    repo_path: String,
+    model: Option<String>,
+) -> CommandResult<AiCommitSuggestion> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let api_key = read_openai_api_key()?.ok_or_else(|| AppError::InvalidInput {
+        code: "OPENAI_KEY_MISSING",
+        message:
+            "Add an OpenAI API key in Preferences > Integrations before generating commit messages."
+                .to_string(),
+    })?;
+    let model = validate_openai_model(model)?;
+    let staged_context = build_staged_commit_context(&repo).await?;
+
+    let response = reqwest::Client::new()
+        .post("https://api.openai.com/v1/responses")
+        .bearer_auth(api_key)
+        .json(&json!({
+            "model": model,
+            "instructions": "You write concise Git commit messages from staged diffs. Return only JSON with keys summary and description. summary must be one line, preferably Conventional Commits style. description should be a short markdown body with 1-4 bullets when useful. Do not invent files or behavior not shown in the staged diff.",
+            "input": staged_context,
+            "reasoning": {
+                "effort": "minimal"
+            },
+            "max_output_tokens": 1200
+        }))
+        .send()
+        .await
+        .map_err(|error| AppError::AiFailed {
+            message: "Could not reach OpenAI.".to_string(),
+            detail: error.to_string(),
+        })?;
+
+    let status = response.status();
+    let body_text = response.text().await.map_err(|error| AppError::AiFailed {
+        message: "Could not read OpenAI response.".to_string(),
+        detail: error.to_string(),
+    })?;
+
+    if !status.is_success() {
+        return Err(AppError::AiFailed {
+            message: format!("OpenAI returned HTTP {status}."),
+            detail: body_text,
+        });
+    }
+
+    parse_openai_commit_response(&body_text)
+}
+
+#[tauri::command]
 async fn git_branch_create(request: BranchCreateRequest) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&request.repo_path).await?;
     validate_ref_arg(&request.name, "branch name")?;
@@ -364,36 +692,48 @@ async fn git_fetch(repo_path: String, remote: Option<String>) -> CommandResult<R
 #[tauri::command]
 async fn git_pull(repo_path: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
-    run_git(Some(&repo), vec!["pull".into()]).await?;
-    build_snapshot(&repo, None).await
+    run_git_snapshot_operation(
+        &repo,
+        vec!["pull".into(), "--ff".into(), "--no-edit".into()],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn git_pull_fast_forward(repo_path: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    run_git_snapshot_operation(
+        &repo,
+        vec!["pull".into(), "--ff".into(), "--no-edit".into()],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn git_pull_rebase(repo_path: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    run_git_snapshot_operation(&repo, vec!["pull".into(), "--rebase".into()]).await
 }
 
 #[tauri::command]
 async fn git_merge(repo_path: String, branch: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&branch, "branch name")?;
-    run_git(
-        Some(&repo),
-        vec!["merge".into(), "--no-edit".into(), branch],
-    )
-    .await?;
-    build_snapshot(&repo, None).await
+    run_git_snapshot_operation(&repo, vec!["merge".into(), "--no-edit".into(), branch]).await
 }
 
 #[tauri::command]
 async fn git_rebase(repo_path: String, upstream: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&upstream, "upstream branch")?;
-    run_git(Some(&repo), vec!["rebase".into(), upstream]).await?;
-    build_snapshot(&repo, None).await
+    run_git_snapshot_operation(&repo, vec!["rebase".into(), upstream]).await
 }
 
 #[tauri::command]
 async fn git_cherry_pick(repo_path: String, commit_sha: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&commit_sha, "commit")?;
-    run_git(Some(&repo), vec!["cherry-pick".into(), commit_sha]).await?;
-    build_snapshot(&repo, None).await
+    run_git_snapshot_operation(&repo, vec!["cherry-pick".into(), commit_sha]).await
 }
 
 #[tauri::command]
@@ -405,6 +745,130 @@ async fn git_revert(repo_path: String, commit_sha: String) -> CommandResult<Repo
         vec!["revert".into(), "--no-edit".into(), commit_sha],
     )
     .await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_conflict_versions(repo_path: String, path: String) -> CommandResult<ConflictVersions> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let mut safe_paths = validate_file_paths(&[path])?;
+    let path = safe_paths.remove(0);
+    let working = std::fs::read_to_string(repo.join(&path)).unwrap_or_default();
+
+    Ok(ConflictVersions {
+        base: git_show_stage(&repo, 1, &path).await.unwrap_or_default(),
+        ours: git_show_stage(&repo, 2, &path).await.unwrap_or_default(),
+        theirs: git_show_stage(&repo, 3, &path).await.unwrap_or_default(),
+        working,
+        path,
+    })
+}
+
+#[tauri::command]
+async fn git_conflict_resolve(
+    repo_path: String,
+    path: String,
+    strategy: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let mut safe_paths = validate_file_paths(&[path])?;
+    let path = safe_paths.remove(0);
+    match strategy.as_str() {
+        "ours" => {
+            run_git(
+                Some(&repo),
+                vec![
+                    "checkout".into(),
+                    "--ours".into(),
+                    "--".into(),
+                    path.clone(),
+                ],
+            )
+            .await?;
+        }
+        "theirs" => {
+            run_git(
+                Some(&repo),
+                vec![
+                    "checkout".into(),
+                    "--theirs".into(),
+                    "--".into(),
+                    path.clone(),
+                ],
+            )
+            .await?;
+        }
+        "both" => {
+            let ours = git_show_stage(&repo, 2, &path).await.unwrap_or_default();
+            let theirs = git_show_stage(&repo, 3, &path).await.unwrap_or_default();
+            let combined = combine_conflict_sides(&ours, &theirs);
+            std::fs::write(repo.join(&path), combined)?;
+        }
+        _ => {
+            return invalid(
+                "INVALID_CONFLICT_STRATEGY",
+                "Conflict strategy must be ours, theirs, or both.",
+            );
+        }
+    }
+
+    run_git(Some(&repo), vec!["add".into(), "--".into(), path]).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_conflict_mark_resolved(
+    repo_path: String,
+    path: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let mut safe_paths = validate_file_paths(&[path])?;
+    let path = safe_paths.remove(0);
+    run_git(Some(&repo), vec!["add".into(), "--".into(), path]).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_operation_continue(repo_path: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    match detect_git_operation(&repo).await {
+        GitOperationState::Rebasing => {
+            run_git_snapshot_operation(&repo, vec!["rebase".into(), "--continue".into()]).await
+        }
+        GitOperationState::CherryPicking => {
+            run_git_snapshot_operation(&repo, vec!["cherry-pick".into(), "--continue".into()]).await
+        }
+        GitOperationState::Merging => {
+            run_git_snapshot_operation(&repo, vec!["commit".into(), "--no-edit".into()]).await
+        }
+        GitOperationState::None => invalid(
+            "NO_GIT_OPERATION",
+            "There is no merge, rebase, or cherry-pick to continue.",
+        ),
+    }
+}
+
+#[tauri::command]
+async fn git_operation_abort(repo_path: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    match detect_git_operation(&repo).await {
+        GitOperationState::Rebasing => {
+            run_git(Some(&repo), vec!["rebase".into(), "--abort".into()]).await?;
+        }
+        GitOperationState::CherryPicking => {
+            run_git(Some(&repo), vec!["cherry-pick".into(), "--abort".into()]).await?;
+        }
+        GitOperationState::Merging => {
+            run_git(Some(&repo), vec!["merge".into(), "--abort".into()]).await?;
+        }
+        GitOperationState::None => {
+            return invalid(
+                "NO_GIT_OPERATION",
+                "There is no merge, rebase, or cherry-pick to abort.",
+            );
+        }
+    }
+
     build_snapshot(&repo, None).await
 }
 
@@ -439,6 +903,7 @@ async fn git_push(
     set_upstream: bool,
 ) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
+    let context = push_context(&repo, remote.as_deref(), branch.as_deref()).await;
     let mut args = vec!["push".into()];
     if force_with_lease {
         args.push("--force-with-lease".into());
@@ -454,7 +919,12 @@ async fn git_push(
         validate_ref_arg(&branch_name, "branch name")?;
         args.push(branch_name);
     }
-    run_git(Some(&repo), args).await?;
+    if let Err(error) = run_git(Some(&repo), args).await {
+        if !force_with_lease && is_push_non_fast_forward_error(&error) {
+            return Err(push_non_fast_forward_error(error, &context));
+        }
+        return Err(error);
+    }
     build_snapshot(&repo, None).await
 }
 
@@ -683,8 +1153,19 @@ async fn resolve_repo_root(path: &str) -> CommandResult<PathBuf> {
 }
 
 async fn run_git(repo: Option<&Path>, args: Vec<String>) -> CommandResult<String> {
+    let extra_headers = git_http_extra_headers(repo, &args).await?;
     let mut command = Command::new("git");
     command.env("GIT_TERMINAL_PROMPT", "0");
+    if !extra_headers.is_empty() {
+        command.env("GIT_CONFIG_COUNT", extra_headers.len().to_string());
+        for (index, header) in extra_headers.iter().enumerate() {
+            command.env(
+                format!("GIT_CONFIG_KEY_{index}"),
+                format!("http.{}.extraheader", header.scope),
+            );
+            command.env(format!("GIT_CONFIG_VALUE_{index}"), &header.header);
+        }
+    }
     if let Some(repo_path) = repo {
         command.arg("-C").arg(repo_path);
     }
@@ -707,6 +1188,319 @@ async fn run_git(repo: Option<&Path>, args: Vec<String>) -> CommandResult<String
             detail,
         })
     }
+}
+
+async fn run_git_snapshot_operation(repo: &Path, args: Vec<String>) -> CommandResult<RepoSnapshot> {
+    match run_git(Some(repo), args).await {
+        Ok(_) => build_snapshot(repo, None).await,
+        Err(error) => {
+            if let Some(snapshot) = snapshot_for_interrupted_operation(repo).await? {
+                Ok(snapshot)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+async fn snapshot_for_interrupted_operation(repo: &Path) -> CommandResult<Option<RepoSnapshot>> {
+    let snapshot = build_snapshot(repo, None).await?;
+    if !snapshot.conflicts.is_empty()
+        || matches!(
+            snapshot.repository.worktree_state,
+            WorktreeState::Merging | WorktreeState::Rebasing | WorktreeState::CherryPicking
+        )
+    {
+        Ok(Some(snapshot))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn git_show_stage(repo: &Path, stage: u8, path: &str) -> CommandResult<String> {
+    run_git(Some(repo), vec!["show".into(), format!(":{stage}:{path}")]).await
+}
+
+fn combine_conflict_sides(ours: &str, theirs: &str) -> String {
+    let mut combined = String::new();
+    combined.push_str(ours.trim_end_matches(['\n', '\r']));
+    if !combined.is_empty() {
+        combined.push('\n');
+    }
+    combined.push_str(theirs.trim_start_matches(['\n', '\r']));
+    if !combined.ends_with('\n') {
+        combined.push('\n');
+    }
+    combined
+}
+
+#[derive(Debug, Clone)]
+struct GitHttpExtraHeader {
+    scope: String,
+    header: String,
+}
+
+#[derive(Debug, Default)]
+struct PushContext {
+    branch: Option<String>,
+    upstream: Option<String>,
+}
+
+async fn push_context(repo: &Path, remote: Option<&str>, branch: Option<&str>) -> PushContext {
+    let branch_name = if let Some(branch_name) = branch
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+    {
+        Some(branch_name)
+    } else {
+        run_git(
+            Some(repo),
+            vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+        )
+        .await
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && value != "HEAD")
+    };
+
+    let explicit_remote = remote
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let upstream = run_git(
+        Some(repo),
+        vec![
+            "rev-parse".into(),
+            "--abbrev-ref".into(),
+            "--symbolic-full-name".into(),
+            "@{u}".into(),
+        ],
+    )
+    .await
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty() && value != "@{u}")
+    .or_else(|| match (explicit_remote, branch_name.as_deref()) {
+        (Some(remote_name), Some(branch_name)) => Some(format!("{remote_name}/{branch_name}")),
+        _ => None,
+    });
+
+    PushContext {
+        branch: branch_name,
+        upstream,
+    }
+}
+
+fn is_push_non_fast_forward_error(error: &AppError) -> bool {
+    let detail = match error {
+        AppError::GitFailed { detail, .. } => detail,
+        _ => return false,
+    };
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("non-fast-forward")
+        || lower.contains("(fetch first)")
+        || (lower.contains("[rejected]") && lower.contains("fetch first"))
+}
+
+fn push_non_fast_forward_error(error: AppError, context: &PushContext) -> AppError {
+    let detail = match error {
+        AppError::GitFailed { detail, .. } => detail,
+        other => return other,
+    };
+    let message = match (&context.branch, &context.upstream) {
+        (Some(branch), Some(upstream)) => format!(
+            "'refs/heads/{branch}' is behind 'refs/remotes/{upstream}'. Update your branch by doing a Pull."
+        ),
+        _ => git_error_summary(&detail),
+    };
+
+    AppError::GitActionRequired {
+        code: "PUSH_NON_FAST_FORWARD",
+        message,
+        detail,
+    }
+}
+
+async fn git_http_extra_headers(
+    repo: Option<&Path>,
+    args: &[String],
+) -> CommandResult<Vec<GitHttpExtraHeader>> {
+    if !is_git_network_command(args) {
+        return Ok(Vec::new());
+    }
+
+    let urls = git_network_urls(repo, args).await;
+    let azure_urls: Vec<_> = urls
+        .iter()
+        .filter_map(|url| azure_devops_auth_target(url))
+        .collect();
+    if azure_urls.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let Some(pat) = read_azure_devops_pat()? else {
+        return invalid(
+            "AZURE_DEVOPS_TOKEN_MISSING",
+            "Add an Azure DevOps Personal Access Token in Preferences > Integrations before running Git network operations against Azure DevOps HTTPS remotes.",
+        );
+    };
+
+    let mut headers: Vec<GitHttpExtraHeader> = Vec::new();
+    for target in azure_urls {
+        if headers.iter().any(|header| header.scope == target.scope) {
+            continue;
+        }
+        let auth = BASE64_STANDARD.encode(format!("{}:{pat}", target.username));
+        headers.push(GitHttpExtraHeader {
+            scope: target.scope,
+            header: format!("Authorization: Basic {auth}"),
+        });
+    }
+    Ok(headers)
+}
+
+fn is_git_network_command(args: &[String]) -> bool {
+    matches!(
+        args.first().map(String::as_str),
+        Some("clone" | "fetch" | "pull" | "push" | "ls-remote")
+    )
+}
+
+async fn git_network_urls(repo: Option<&Path>, args: &[String]) -> Vec<String> {
+    match args.first().map(String::as_str) {
+        Some("clone" | "ls-remote") => args
+            .iter()
+            .skip(1)
+            .find(|value| !value.starts_with('-'))
+            .cloned()
+            .into_iter()
+            .collect(),
+        Some("fetch" | "pull" | "push") => {
+            let Some(repo) = repo else {
+                return Vec::new();
+            };
+            let remote_name = remote_name_from_network_args(args)
+                .or_else(|| current_upstream_remote(repo).ok().flatten());
+            git_remote_urls(repo, remote_name.as_deref()).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn remote_name_from_network_args(args: &[String]) -> Option<String> {
+    match args.first().map(String::as_str) {
+        Some("fetch" | "pull") => args
+            .iter()
+            .skip(1)
+            .find(|value| !value.starts_with('-'))
+            .cloned(),
+        Some("push") => args
+            .iter()
+            .skip(1)
+            .find(|value| !value.starts_with('-'))
+            .cloned(),
+        _ => None,
+    }
+}
+
+fn current_upstream_remote(repo: &Path) -> CommandResult<Option<String>> {
+    let output = std::process::Command::new("git")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let upstream = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(upstream
+        .split_once('/')
+        .map(|(remote, _)| remote.to_string())
+        .filter(|remote| !remote.trim().is_empty()))
+}
+
+fn git_remote_urls(repo: &Path, remote_name: Option<&str>) -> CommandResult<Vec<String>> {
+    let mut urls = Vec::new();
+    if let Some(remote_name) = remote_name {
+        for key in [
+            format!("remote.{remote_name}.url"),
+            format!("remote.{remote_name}.pushurl"),
+        ] {
+            urls.extend(git_config_values(repo, &["--get-all", &key])?);
+        }
+        return Ok(urls);
+    }
+
+    let mut lines = git_config_values(repo, &["--get-regexp", r"^remote\..*\.url$"])?;
+    lines.extend(git_config_values(
+        repo,
+        &["--get-regexp", r"^remote\..*\.pushurl$"],
+    )?);
+    for line in lines {
+        if let Some((_, value)) = line.split_once(' ') {
+            urls.push(value.to_string());
+        }
+    }
+    Ok(urls)
+}
+
+fn git_config_values(repo: &Path, args: &[&str]) -> CommandResult<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("-C")
+        .arg(repo)
+        .arg("config")
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AzureDevOpsAuthTarget {
+    scope: String,
+    username: String,
+}
+
+fn azure_devops_auth_target(url: &str) -> Option<AzureDevOpsAuthTarget> {
+    let lower = url.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return None;
+    }
+
+    let protocol_end = url.find("://")?;
+    let scheme = url[..protocol_end].to_ascii_lowercase();
+    let rest = &url[protocol_end + 3..];
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host_start = authority.rfind('@').map_or(0, |index| index + 1);
+    let host = &authority[host_start..];
+    let host_lower = host.to_ascii_lowercase();
+    let host_without_port = host_lower.split(':').next().unwrap_or_default();
+    if host_without_port != "dev.azure.com" && !host_without_port.ends_with(".visualstudio.com") {
+        return None;
+    }
+
+    let username = authority
+        .get(..host_start.saturating_sub(1))
+        .and_then(|value| value.rsplit('@').next())
+        .and_then(|value| value.split(':').next())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("opengit")
+        .to_string();
+
+    Some(AzureDevOpsAuthTarget {
+        scope: format!("{scheme}://{host}/"),
+        username,
+    })
 }
 
 fn parse_status(raw: &str) -> (BranchStatus, Vec<FileChange>, Vec<Conflict>) {
@@ -778,8 +1572,8 @@ fn parse_status(raw: &str) -> (BranchStatus, Vec<FileChange>, Vec<Conflict>) {
             continue;
         }
         if record.starts_with("u ") {
-            let parts: Vec<&str> = record.splitn(11, ' ').collect();
-            if let (Some(xy), Some(path)) = (parts.get(1), parts.get(10)) {
+            let parts: Vec<&str> = record.splitn(12, ' ').collect();
+            if let (Some(xy), Some(path)) = (parts.get(1), parts.get(11)) {
                 let change = change_from_xy(path, None, xy, None);
                 conflicts.push(Conflict {
                     path: (*path).to_string(),
@@ -1048,21 +1842,11 @@ async fn detect_worktree_state(
     branch: &BranchStatus,
     changes: &[FileChange],
 ) -> WorktreeState {
-    let git_dir = run_git(Some(repo), vec!["rev-parse".into(), "--git-dir".into()])
-        .await
-        .ok()
-        .map(|value| repo.join(value.trim()));
-
-    if let Some(git_dir) = git_dir {
-        if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
-            return WorktreeState::Rebasing;
-        }
-        if git_dir.join("MERGE_HEAD").exists() {
-            return WorktreeState::Merging;
-        }
-        if git_dir.join("CHERRY_PICK_HEAD").exists() {
-            return WorktreeState::CherryPicking;
-        }
+    match detect_git_operation(repo).await {
+        GitOperationState::Rebasing => return WorktreeState::Rebasing,
+        GitOperationState::Merging => return WorktreeState::Merging,
+        GitOperationState::CherryPicking => return WorktreeState::CherryPicking,
+        GitOperationState::None => {}
     }
 
     if branch.current_branch.as_deref() == Some("(detached)")
@@ -1076,6 +1860,38 @@ async fn detect_worktree_state(
     } else {
         WorktreeState::Dirty
     }
+}
+
+async fn detect_git_operation(repo: &Path) -> GitOperationState {
+    let Some(git_dir) = git_dir_path(repo).await else {
+        return GitOperationState::None;
+    };
+
+    if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        return GitOperationState::Rebasing;
+    }
+    if git_dir.join("MERGE_HEAD").exists() {
+        return GitOperationState::Merging;
+    }
+    if git_dir.join("CHERRY_PICK_HEAD").exists() {
+        return GitOperationState::CherryPicking;
+    }
+
+    GitOperationState::None
+}
+
+async fn git_dir_path(repo: &Path) -> Option<PathBuf> {
+    run_git(Some(repo), vec!["rev-parse".into(), "--git-dir".into()])
+        .await
+        .ok()
+        .map(|value| {
+            let git_dir = PathBuf::from(value.trim());
+            if git_dir.is_absolute() {
+                git_dir
+            } else {
+                repo.join(git_dir)
+            }
+        })
 }
 
 fn validate_file_paths(paths: &[String]) -> CommandResult<Vec<String>> {
@@ -1143,6 +1959,294 @@ fn validate_remote_url(value: &str) -> CommandResult<()> {
     Ok(())
 }
 
+fn openai_key_entry() -> CommandResult<Entry> {
+    Entry::new(OPENAI_KEY_SERVICE, OPENAI_KEY_ACCOUNT).map_err(map_keyring_error)
+}
+
+fn azure_devops_pat_entry() -> CommandResult<Entry> {
+    Entry::new(OPENAI_KEY_SERVICE, AZURE_DEVOPS_PAT_ACCOUNT).map_err(map_keyring_error)
+}
+
+fn read_openai_api_key() -> CommandResult<Option<String>> {
+    match openai_key_entry()?.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(error) => Err(map_keyring_error(error)),
+    }
+}
+
+fn read_azure_devops_pat() -> CommandResult<Option<String>> {
+    match azure_devops_pat_entry()?.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(error) => Err(map_keyring_error(error)),
+    }
+}
+
+fn map_keyring_error(error: KeyringError) -> AppError {
+    AppError::SecureStorage(error.to_string())
+}
+
+fn validate_openai_model(model: Option<String>) -> CommandResult<String> {
+    let value = model
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
+    if value.len() > 80 || value.starts_with('-') || value.chars().any(|ch| ch.is_control()) {
+        return invalid(
+            "INVALID_OPENAI_MODEL",
+            "OpenAI model contains unsafe characters.",
+        );
+    }
+    Ok(value)
+}
+
+fn openai_error_message(body_text: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body_text) {
+        if let Some(message) = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(|message| message.as_str())
+            .filter(|message| !message.trim().is_empty())
+        {
+            return truncate_display_text(&redact_secrets(message), 300);
+        }
+    }
+
+    let fallback = body_text.trim();
+    if fallback.is_empty() {
+        "Request failed.".to_string()
+    } else {
+        truncate_display_text(&redact_secrets(fallback), 300)
+    }
+}
+
+async fn build_staged_commit_context(repo: &Path) -> CommandResult<String> {
+    let staged_names = run_git(
+        Some(repo),
+        vec![
+            "diff".into(),
+            "--cached".into(),
+            "--name-only".into(),
+            "-z".into(),
+        ],
+    )
+    .await?;
+    if staged_names.is_empty() {
+        return invalid(
+            "NO_STAGED_FILES",
+            "Stage files before generating a commit message.",
+        );
+    }
+
+    let branch = run_git(
+        Some(repo),
+        vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+    )
+    .await
+    .unwrap_or_else(|_| "unknown".to_string());
+    let name_status = run_git(
+        Some(repo),
+        vec![
+            "diff".into(),
+            "--cached".into(),
+            "--name-status".into(),
+            "--find-renames".into(),
+        ],
+    )
+    .await?;
+    let stat = run_git(
+        Some(repo),
+        vec!["diff".into(), "--cached".into(), "--stat".into()],
+    )
+    .await?;
+    let diff = run_git(
+        Some(repo),
+        vec![
+            "diff".into(),
+            "--cached".into(),
+            "--no-ext-diff".into(),
+            "--find-renames".into(),
+            "--unified=80".into(),
+        ],
+    )
+    .await?;
+
+    let repo_name = repo
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("repository");
+    let diff = truncate_for_prompt(&diff, MAX_STAGED_DIFF_CHARS);
+
+    Ok(format!(
+        "Repository: {repo_name}\nBranch: {}\n\nStaged files:\n{}\nDiff stat:\n{}\nStaged diff{}:\n```diff\n{}\n```",
+        branch.trim(),
+        name_status.trim(),
+        stat.trim(),
+        if diff.truncated { " (truncated)" } else { "" },
+        diff.text
+    ))
+}
+
+struct TruncatedText {
+    text: String,
+    truncated: bool,
+}
+
+fn truncate_for_prompt(value: &str, max_chars: usize) -> TruncatedText {
+    let mut text = String::with_capacity(value.len().min(max_chars));
+    let mut truncated = false;
+    for (index, ch) in value.chars().enumerate() {
+        if index >= max_chars {
+            truncated = true;
+            break;
+        }
+        text.push(ch);
+    }
+    if truncated {
+        text.push_str("\n\n[diff truncated by OpenGit]");
+    }
+    TruncatedText { text, truncated }
+}
+
+fn truncate_display_text(value: &str, max_chars: usize) -> String {
+    let mut text = String::with_capacity(value.len().min(max_chars));
+    let mut truncated = false;
+    for (index, ch) in value.chars().enumerate() {
+        if index >= max_chars {
+            truncated = true;
+            break;
+        }
+        text.push(ch);
+    }
+    if truncated {
+        text.push_str("...");
+    }
+    text
+}
+
+fn parse_openai_commit_response(body_text: &str) -> CommandResult<AiCommitSuggestion> {
+    let body: OpenAiResponseBody =
+        serde_json::from_str(body_text).map_err(|error| AppError::AiFailed {
+            message: "OpenAI returned an unreadable response.".to_string(),
+            detail: error.to_string(),
+        })?;
+    let output = extract_openai_output_text(&body).ok_or_else(|| AppError::AiFailed {
+        message: openai_missing_output_message(&body),
+        detail: truncate_display_text(&redact_secrets(body_text), 2_000),
+    })?;
+
+    parse_commit_suggestion_text(&output)
+}
+
+fn extract_openai_output_text(body: &OpenAiResponseBody) -> Option<String> {
+    if let Some(output_text) = body
+        .output_text
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(output_text.clone());
+    }
+
+    body.output
+        .as_ref()
+        .and_then(extract_text_from_response_value)
+}
+
+fn extract_text_from_response_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(_) => None,
+        serde_json::Value::Array(items) => items.iter().find_map(extract_text_from_response_value),
+        serde_json::Value::Object(map) => {
+            let item_type = map.get("type").and_then(|item| item.as_str());
+            if matches!(item_type, Some("reasoning")) {
+                return None;
+            }
+
+            if matches!(item_type, Some("output_text" | "text")) {
+                if let Some(text) = map
+                    .get("text")
+                    .and_then(|item| item.as_str())
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    return Some(text.to_string());
+                }
+            }
+
+            map.get("content")
+                .and_then(extract_text_from_response_value)
+                .or_else(|| {
+                    map.get("message")
+                        .and_then(extract_text_from_response_value)
+                })
+                .or_else(|| map.get("output").and_then(extract_text_from_response_value))
+        }
+        _ => None,
+    }
+}
+
+fn openai_missing_output_message(body: &OpenAiResponseBody) -> String {
+    let status = body.status.as_deref().unwrap_or("unknown");
+    if status == "incomplete" {
+        let reason = body
+            .incomplete_details
+            .as_ref()
+            .and_then(|details| details.reason.as_deref())
+            .unwrap_or("unknown reason");
+        return format!("OpenAI stopped before returning commit text ({reason}). Try again with fewer staged changes or a smaller diff.");
+    }
+
+    format!("OpenAI returned status '{status}' without commit text. Try again, or use a different model in Preferences > Integrations.")
+}
+
+fn parse_commit_suggestion_text(text: &str) -> CommandResult<AiCommitSuggestion> {
+    let cleaned = text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let json_candidate = if cleaned.starts_with('{') {
+        cleaned
+    } else if let (Some(start), Some(end)) = (cleaned.find('{'), cleaned.rfind('}')) {
+        &cleaned[start..=end]
+    } else {
+        ""
+    };
+
+    if !json_candidate.is_empty() {
+        let wire: AiCommitSuggestionWire =
+            serde_json::from_str(json_candidate).map_err(|error| AppError::AiFailed {
+                message: "OpenAI returned malformed commit JSON.".to_string(),
+                detail: error.to_string(),
+            })?;
+        return normalize_commit_suggestion(wire.summary, wire.description.unwrap_or_default());
+    }
+
+    let mut lines = cleaned.lines();
+    let summary = lines.next().unwrap_or_default().trim().to_string();
+    let description = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    normalize_commit_suggestion(summary, description)
+}
+
+fn normalize_commit_suggestion(
+    summary: String,
+    description: String,
+) -> CommandResult<AiCommitSuggestion> {
+    let summary = summary.trim().trim_matches('"').to_string();
+    let description = description.trim().to_string();
+    if summary.is_empty() {
+        return invalid(
+            "OPENAI_EMPTY_SUMMARY",
+            "OpenAI did not return a commit summary.",
+        );
+    }
+    Ok(AiCommitSuggestion {
+        summary,
+        description,
+    })
+}
+
 fn clamp_history_limit(value: Option<u32>) -> u32 {
     value
         .unwrap_or(DEFAULT_HISTORY_LIMIT)
@@ -1197,9 +2301,24 @@ fn redact_secrets(input: &str) -> String {
 fn git_error_summary(detail: &str) -> String {
     detail
         .lines()
-        .find(|line| !line.trim().is_empty())
+        .find(|line| is_actionable_git_error_line(line.trim()))
         .map(|line| redact_secrets(line.trim()))
         .unwrap_or_else(|| "Git command failed.".to_string())
+}
+
+fn is_actionable_git_error_line(line: &str) -> bool {
+    if line.is_empty() {
+        return false;
+    }
+
+    let lower = line.to_ascii_lowercase();
+    !lower.starts_with("to ")
+        && !lower.starts_with("from ")
+        && !lower.starts_with("enumerating objects:")
+        && !lower.starts_with("counting objects:")
+        && !lower.starts_with("compressing objects:")
+        && !lower.starts_with("writing objects:")
+        && !lower.starts_with("total ")
 }
 
 fn invalid<T>(code: &'static str, message: &str) -> CommandResult<T> {
@@ -1226,16 +2345,32 @@ pub fn run() {
             git_unstage,
             git_discard,
             git_commit,
+            git_commit_message_update,
+            ai_openai_status,
+            ai_openai_test_api_key,
+            ai_openai_save_api_key,
+            ai_openai_clear_api_key,
+            azure_devops_status,
+            azure_devops_save_pat,
+            azure_devops_clear_pat,
+            ai_commit_message_generate,
             git_branch_create,
             git_branch_checkout,
             git_branch_delete,
             git_branch_rename,
             git_fetch,
             git_pull,
+            git_pull_fast_forward,
+            git_pull_rebase,
             git_merge,
             git_rebase,
             git_cherry_pick,
             git_revert,
+            git_conflict_versions,
+            git_conflict_resolve,
+            git_conflict_mark_resolved,
+            git_operation_continue,
+            git_operation_abort,
             git_tag_create,
             git_push,
             git_remote_add,
@@ -1270,6 +2405,30 @@ mod tests {
     }
 
     #[test]
+    fn detects_azure_devops_https_auth_targets() {
+        let target = azure_devops_auth_target("https://logan@dev.azure.com/org/project/_git/repo")
+            .expect("azure target");
+
+        assert_eq!(target.scope, "https://dev.azure.com/");
+        assert_eq!(target.username, "logan");
+    }
+
+    #[test]
+    fn detects_visualstudio_https_auth_targets() {
+        let target = azure_devops_auth_target("https://org.visualstudio.com/project/_git/repo")
+            .expect("azure target");
+
+        assert_eq!(target.scope, "https://org.visualstudio.com/");
+        assert_eq!(target.username, "opengit");
+    }
+
+    #[test]
+    fn ignores_non_azure_auth_targets() {
+        assert!(azure_devops_auth_target("https://github.com/owner/repo.git").is_none());
+        assert!(azure_devops_auth_target("git@ssh.dev.azure.com:v3/org/project/repo").is_none());
+    }
+
+    #[test]
     fn clamps_history_limit() {
         assert_eq!(clamp_history_limit(None), DEFAULT_HISTORY_LIMIT);
         assert_eq!(clamp_history_limit(Some(1)), MIN_HISTORY_LIMIT);
@@ -1281,6 +2440,56 @@ mod tests {
     fn redacts_credentials_from_urls() {
         let redacted = redact_secrets("https://token:secret@github.com/example/private.git");
         assert_eq!(redacted, "https://***@github.com/example/private.git");
+    }
+
+    #[test]
+    fn summarizes_push_rejection_from_actionable_line() {
+        let detail = concat!(
+            "To https://dev.azure.com/org/project/_git/repo\n",
+            " ! [rejected]        main -> main (non-fast-forward)\n",
+            "error: failed to push some refs to 'https://dev.azure.com/org/project/_git/repo'\n"
+        );
+
+        assert_eq!(
+            git_error_summary(detail),
+            "! [rejected] main -> main (non-fast-forward)"
+        );
+    }
+
+    #[test]
+    fn classifies_non_fast_forward_push_as_recoverable() {
+        let error = AppError::GitFailed {
+            message: "! [rejected] dev-unifiedapp -> dev-unifiedapp (non-fast-forward)".to_string(),
+            detail: concat!(
+                "To https://dev.azure.com/org/project/_git/repo\n",
+                " ! [rejected] dev-unifiedapp -> dev-unifiedapp (non-fast-forward)\n"
+            )
+            .to_string(),
+        };
+        let context = PushContext {
+            branch: Some("dev-unifiedapp".to_string()),
+            upstream: Some("origin/dev-unifiedapp".to_string()),
+        };
+
+        assert!(is_push_non_fast_forward_error(&error));
+        let recovery = push_non_fast_forward_error(error, &context);
+        let serialized = serde_json::to_value(recovery).expect("error should serialize");
+
+        assert_eq!(serialized["code"], "PUSH_NON_FAST_FORWARD");
+        assert_eq!(
+            serialized["message"],
+            "'refs/heads/dev-unifiedapp' is behind 'refs/remotes/origin/dev-unifiedapp'. Update your branch by doing a Pull."
+        );
+    }
+
+    #[test]
+    fn keeps_fatal_auth_errors_as_summary() {
+        let detail = "fatal: could not read Password for 'https://user@dev.azure.com': terminal prompts disabled\n";
+
+        assert_eq!(
+            git_error_summary(detail),
+            "fatal: could not read Password for 'https://***@dev.azure.com': terminal prompts disabled"
+        );
     }
 
     #[test]
@@ -1308,6 +2517,30 @@ mod tests {
         assert!(changes[1].staged);
         assert!(!changes[1].unstaged);
         assert_eq!(changes[2].path, "docs/new.md");
+    }
+
+    #[test]
+    fn parses_porcelain_v2_conflicts() {
+        let raw = concat!(
+            "# branch.oid abc123\0",
+            "# branch.head main\0",
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc ddd src/conflict.ts\0"
+        );
+
+        let (_branch, changes, conflicts) = parse_status(raw);
+
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].path, "src/conflict.ts");
+        assert_eq!(conflicts[0].kind, "UU");
+        assert!(matches!(changes[0].status, FileStatus::Conflicted));
+    }
+
+    #[test]
+    fn combines_conflict_sides_with_single_separator() {
+        assert_eq!(
+            combine_conflict_sides("current\n", "\nincoming"),
+            "current\nincoming\n"
+        );
     }
 
     #[test]
@@ -1340,5 +2573,76 @@ mod tests {
         assert_eq!(files[2].path, "new.ts");
         assert_eq!(files[2].old_path.as_deref(), Some("old.ts"));
         assert!(matches!(files[2].status, FileStatus::Renamed));
+    }
+
+    #[test]
+    fn parses_nested_openai_response_text() {
+        let body = r#"{
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "{\"summary\":\"fix: save OpenAI key\",\"description\":\"- Enable macOS keychain backend\"}"
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let suggestion = parse_openai_commit_response(body).expect("response should parse");
+
+        assert_eq!(suggestion.summary, "fix: save OpenAI key");
+        assert_eq!(suggestion.description, "- Enable macOS keychain backend");
+    }
+
+    #[test]
+    fn ignores_openai_reasoning_ids_when_extracting_text() {
+        let body = r#"{
+            "status": "completed",
+            "output": [
+                {
+                    "id": "rs_0bc5e10ff8c90d11006a0f1592300c8193bda9bce888d5d36b",
+                    "type": "reasoning",
+                    "summary": []
+                },
+                {
+                    "id": "msg_123",
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "{\"summary\":\"fix: parse OpenAI text\",\"description\":\"- Ignore reasoning item ids\"}"
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let suggestion = parse_openai_commit_response(body).expect("response should parse");
+
+        assert_eq!(suggestion.summary, "fix: parse OpenAI text");
+        assert_eq!(suggestion.description, "- Ignore reasoning item ids");
+    }
+
+    #[test]
+    fn explains_incomplete_openai_response_without_text() {
+        let body = r#"{
+            "status": "incomplete",
+            "incomplete_details": {
+                "reason": "max_output_tokens"
+            },
+            "output": []
+        }"#;
+
+        let error = parse_openai_commit_response(body).expect_err("response should fail");
+        let serialized = serde_json::to_value(error).expect("error should serialize");
+
+        assert!(serialized["message"]
+            .as_str()
+            .expect("message")
+            .contains("max_output_tokens"));
     }
 }
