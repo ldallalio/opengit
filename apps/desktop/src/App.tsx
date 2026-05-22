@@ -131,6 +131,13 @@ type LayoutState = {
 };
 type HistoryColumnKey = "branch" | "graph" | "message" | "author" | "date" | "hash";
 type HistoryColumnWidths = Record<HistoryColumnKey, number>;
+type HistorySortDirection = "desc" | "asc";
+type HistoryFilters = {
+  author: string;
+  type: string;
+  dateDirection: HistorySortDirection;
+};
+type HistoryFilterColumn = "message" | "author" | "date";
 type RefKind = "head" | "local" | "remote" | "tag" | "other";
 type RefChip = { label: string; kind: RefKind; color: string; raw: string };
 type DisplayBranch = Branch & { isRemote: boolean; isUnborn: boolean };
@@ -220,6 +227,12 @@ const maxVisibleGraphLanes = 12;
 const repoTabLimit = 9;
 const historyLimitOptions = [100, 250, 500, 1000, 2000] as const;
 const historyColumnStorageKey = "opengit:historyColumnWidths";
+const historyFilterStorageKey = "opengit:historyFilters";
+const defaultHistoryFilters: HistoryFilters = {
+  author: "",
+  type: "",
+  dateDirection: "desc"
+};
 const defaultHistoryColumnWidths: HistoryColumnWidths = {
   branch: 150,
   graph: 180,
@@ -297,6 +310,19 @@ function saveHistoryColumnWidths(widths: HistoryColumnWidths) {
   localStorage.setItem(historyColumnStorageKey, JSON.stringify(widths));
 }
 
+function loadHistoryFilters(): HistoryFilters {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(historyFilterStorageKey) ?? "{}") as Partial<HistoryFilters>;
+    return {
+      author: typeof parsed.author === "string" ? parsed.author : defaultHistoryFilters.author,
+      type: typeof parsed.type === "string" ? parsed.type : defaultHistoryFilters.type,
+      dateDirection: parsed.dateDirection === "asc" ? "asc" : defaultHistoryFilters.dateDirection
+    };
+  } catch {
+    return defaultHistoryFilters;
+  }
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
@@ -345,6 +371,7 @@ export default function App() {
   const [repoTabs, setRepoTabs] = useState<string[]>(loadRepoTabs);
   const [layout, setLayout] = useState<LayoutState>(defaultLayout);
   const [historyColumnWidths, setHistoryColumnWidths] = useState<HistoryColumnWidths>(loadHistoryColumnWidths);
+  const [historyFilters, setHistoryFilters] = useState<HistoryFilters>(loadHistoryFilters);
   const [branchMenu, setBranchMenu] = useState<BranchMenuState | null>(null);
   const [branchSwitcherOpen, setBranchSwitcherOpen] = useState(false);
   const [branchSearch, setBranchSearch] = useState("");
@@ -357,7 +384,11 @@ export default function App() {
   const activeDiffPath = diffMode === "commit" ? selectedCommitFile?.path : selectedFile?.path;
   const activeDiff = diffMode === "commit" ? commitDiff : diff;
   const activeDiffLoading = diffMode === "commit" && commitDiffLoading;
-  const graphRows = useMemo(() => buildGraphRows(snapshot?.commits ?? []), [snapshot]);
+  const filteredHistoryCommits = useMemo(() => filterHistoryCommits(snapshot?.commits ?? [], historyFilters), [snapshot, historyFilters]);
+  const historyAuthors = useMemo(() => uniqueHistoryAuthors(snapshot?.commits ?? []), [snapshot]);
+  const historyTypes = useMemo(() => uniqueHistoryTypes(snapshot?.commits ?? []), [snapshot]);
+  const historyFiltersActive = areHistoryFiltersActive(historyFilters);
+  const graphRows = useMemo(() => buildGraphRows(filteredHistoryCommits), [filteredHistoryCommits]);
   const activeConflictState = hasActiveConflictState(snapshot);
   const selectedConflict = useMemo(
     () => snapshot?.conflicts.find((conflict) => conflict.path === selectedConflictPath) ?? snapshot?.conflicts[0] ?? null,
@@ -391,6 +422,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("opengit:openaiModel", openAiModel);
   }, [openAiModel]);
+
+  useEffect(() => {
+    localStorage.setItem(historyFilterStorageKey, JSON.stringify(historyFilters));
+  }, [historyFilters]);
 
   useEffect(() => {
     if (!snapshot || !activeConflictState) {
@@ -1476,7 +1511,18 @@ export default function App() {
                 </div>
               ) : (
                 <div className="history-panel-actions">
-                  <span>{snapshot ? `${snapshot.commits.length}/${historyLimit}` : "0"}</span>
+                  <span>
+                    {snapshot
+                      ? historyFiltersActive
+                        ? `${filteredHistoryCommits.length}/${snapshot.commits.length}`
+                        : `${snapshot.commits.length}/${historyLimit}`
+                      : "0"}
+                  </span>
+                  {historyFiltersActive && (
+                    <Button variant="ghost" onClick={() => setHistoryFilters(defaultHistoryFilters)}>
+                      Clear Filters
+                    </Button>
+                  )}
                   <select
                     value={historyLimit}
                     onChange={(event) => changeHistoryLimit(Number(event.target.value))}
@@ -1522,9 +1568,13 @@ export default function App() {
                 commitMessage={commitMessage}
                 setCommitMessage={setCommitMessage}
                 columnWidths={historyColumnWidths}
+                filters={historyFilters}
+                authors={historyAuthors}
+                types={historyTypes}
                 stagedCount={stagedChanges.length}
                 unstagedCount={unstagedChanges.length}
                 onColumnResizeStart={startHistoryColumnResize}
+                onFilterChange={(next) => setHistoryFilters((current) => ({ ...current, ...next }))}
                 onOpenBranchMenu={openBranchMenu}
                 onOpenCommitMenu={(commitItem, event) => {
                   openBranchMenu(targetFromCommit(commitItem, snapshot), event);
@@ -2097,9 +2147,13 @@ function CommitGraphTable({
   commitMessage,
   setCommitMessage,
   columnWidths,
+  filters,
+  authors,
+  types,
   stagedCount,
   unstagedCount,
   onColumnResizeStart,
+  onFilterChange,
   onOpenBranchMenu,
   onOpenCommitMenu,
   onSelect
@@ -2110,13 +2164,18 @@ function CommitGraphTable({
   commitMessage: string;
   setCommitMessage: (value: string) => void;
   columnWidths: HistoryColumnWidths;
+  filters: HistoryFilters;
+  authors: string[];
+  types: string[];
   stagedCount: number;
   unstagedCount: number;
   onColumnResizeStart: (column: HistoryColumnKey, event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onFilterChange: (next: Partial<HistoryFilters>) => void;
   onOpenBranchMenu: (target: BranchMenuTarget, event: ReactMouseEvent<HTMLElement>) => void;
   onOpenCommitMenu: (commit: Commit, event: ReactMouseEvent<HTMLElement>) => void;
   onSelect: (commit: Commit) => void;
 }) {
+  const [openFilterColumn, setOpenFilterColumn] = useState<HistoryFilterColumn | null>(null);
   const naturalLaneCount = Math.min(maxVisibleGraphLanes, Math.max(4, Math.max(...rows.map((row) => row.maxLane), 1)));
   const visibleLaneCount = Math.max(4, Math.min(naturalLaneCount, Math.floor((columnWidths.graph - 24) / graphLaneWidth)));
   const graphWidth = columnWidths.graph;
@@ -2138,21 +2197,60 @@ function CommitGraphTable({
     { key: "date", label: "Date / Time" },
     { key: "hash", label: "Hash" }
   ];
+  const activeFilterLabels: Partial<Record<HistoryFilterColumn, string>> = {
+    message: filters.type ? filters.type : undefined,
+    author: filters.author ? filters.author : undefined,
+    date: filters.dateDirection === "asc" ? "Oldest" : undefined
+  };
 
   return (
     <div className="graph-history" style={style}>
       <div className="graph-history-header" role="row">
-        {headers.map((header) => (
-          <span key={header.key} className="history-column-header">
-            <span>{header.label}</span>
-            <button
-              type="button"
-              className="history-column-resize"
-              aria-label={`Resize ${header.label} column`}
-              onPointerDown={(event) => onColumnResizeStart(header.key, event)}
-            />
-          </span>
-        ))}
+        {headers.map((header) => {
+          const filterColumn = isHistoryFilterColumn(header.key) ? header.key : null;
+          return (
+            <span key={header.key} className={clsx("history-column-header", filterColumn && "filterable")}>
+              {filterColumn ? (
+                <>
+                  <button
+                    type="button"
+                    className={clsx("history-column-label", activeFilterLabels[filterColumn] && "active")}
+                    aria-haspopup="menu"
+                    aria-expanded={openFilterColumn === filterColumn}
+                    onClick={() => setOpenFilterColumn((current) => (current === filterColumn ? null : filterColumn))}
+                  >
+                    <span>{header.label}</span>
+                    {activeFilterLabels[filterColumn] && <small>{activeFilterLabels[filterColumn]}</small>}
+                    <ChevronDown size={11} />
+                  </button>
+                  {openFilterColumn === filterColumn && (
+                    <HistoryFilterMenu
+                      column={filterColumn}
+                      filters={filters}
+                      authors={authors}
+                      types={types}
+                      onFilterChange={(next) => {
+                        onFilterChange(next);
+                        setOpenFilterColumn(null);
+                      }}
+                    />
+                  )}
+                </>
+              ) : (
+                <span>{header.label}</span>
+              )}
+              <button
+                type="button"
+                className="history-column-resize"
+                aria-label={`Resize ${header.label} column`}
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                  onColumnResizeStart(header.key, event);
+                }}
+              />
+            </span>
+          );
+        })}
       </div>
       <div className="graph-history-body">
         {snapshot && snapshot.changes.length > 0 && (
@@ -2182,6 +2280,13 @@ function CommitGraphTable({
             </span>
             <span className="graph-date-cell">{formatDateTime(new Date().toISOString())}</span>
             <span className="graph-hash-cell working">working</span>
+          </div>
+        )}
+        {rows.length === 0 && (
+          <div className="graph-filter-empty">
+            <Search size={16} />
+            <strong>No commits match these filters</strong>
+            <span>Clear the active history filters to show the full graph.</span>
           </div>
         )}
         {rows.map((row) => (
@@ -2231,6 +2336,78 @@ function CommitGraphTable({
       </div>
     </div>
   );
+}
+
+function HistoryFilterMenu({
+  column,
+  filters,
+  authors,
+  types,
+  onFilterChange
+}: {
+  column: HistoryFilterColumn;
+  filters: HistoryFilters;
+  authors: string[];
+  types: string[];
+  onFilterChange: (next: Partial<HistoryFilters>) => void;
+}) {
+  if (column === "author") {
+    return (
+      <div className="history-filter-menu" role="menu" aria-label="Filter by author">
+        <button type="button" className={!filters.author ? "selected" : undefined} onClick={() => onFilterChange({ author: "" })}>
+          All authors
+        </button>
+        {authors.map((author) => (
+          <button
+            key={author}
+            type="button"
+            className={filters.author === author ? "selected" : undefined}
+            onClick={() => onFilterChange({ author })}
+          >
+            {author}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  if (column === "message") {
+    return (
+      <div className="history-filter-menu" role="menu" aria-label="Filter by commit type">
+        <button type="button" className={!filters.type ? "selected" : undefined} onClick={() => onFilterChange({ type: "" })}>
+          All types
+        </button>
+        {types.map((type) => (
+          <button key={type} type="button" className={filters.type === type ? "selected" : undefined} onClick={() => onFilterChange({ type })}>
+            {type}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="history-filter-menu" role="menu" aria-label="Sort by date">
+      <button
+        type="button"
+        className={filters.dateDirection === "desc" ? "selected" : undefined}
+        onClick={() => onFilterChange({ dateDirection: "desc" })}
+      >
+        Newest first
+      </button>
+      <button
+        type="button"
+        className={filters.dateDirection === "asc" ? "selected" : undefined}
+        onClick={() => onFilterChange({ dateDirection: "asc" })}
+      >
+        Oldest first
+      </button>
+    </div>
+  );
+}
+
+function isHistoryFilterColumn(key: HistoryColumnKey): key is HistoryFilterColumn {
+  return key === "message" || key === "author" || key === "date";
 }
 
 function CommitGraphSvg({ row, width, laneCount }: { row: GraphRow; width: number; laneCount: number }) {
@@ -3114,6 +3291,50 @@ function titleForPreferenceSection(section: PreferenceSection) {
   return titles[section];
 }
 
+function filterHistoryCommits(commits: Commit[], filters: HistoryFilters): Commit[] {
+  const filtered = commits.filter((commitItem) => {
+    if (filters.author && commitItem.author !== filters.author) return false;
+    if (filters.type && commitMessageType(commitItem.message) !== filters.type) return false;
+    return true;
+  });
+
+  if (filters.dateDirection === "asc") {
+    return [...filtered].sort((left, right) => Date.parse(left.date) - Date.parse(right.date));
+  }
+
+  return filtered;
+}
+
+function uniqueHistoryAuthors(commits: Commit[]) {
+  return [...new Set(commits.map((commitItem) => commitItem.author).filter(Boolean))].sort((left, right) =>
+    left.localeCompare(right, undefined, { sensitivity: "base" })
+  );
+}
+
+function uniqueHistoryTypes(commits: Commit[]) {
+  const types = [...new Set(commits.map((commitItem) => commitMessageType(commitItem.message)).filter(Boolean))];
+  const preferredOrder = ["fix", "feat", "chore", "merge", "docs", "refactor", "test", "build", "ci", "perf", "style", "revert", "wip"];
+  return types.sort((left, right) => {
+    const leftIndex = preferredOrder.indexOf(left);
+    const rightIndex = preferredOrder.indexOf(right);
+    if (leftIndex !== -1 || rightIndex !== -1) {
+      return (leftIndex === -1 ? preferredOrder.length : leftIndex) - (rightIndex === -1 ? preferredOrder.length : rightIndex);
+    }
+    return left.localeCompare(right);
+  });
+}
+
+function commitMessageType(message: string) {
+  const trimmed = message.trim();
+  if (/^merge\b/i.test(trimmed)) return "merge";
+  const match = trimmed.match(/^([a-z][a-z0-9-]*)(\([^)]+\))?!?:/i);
+  return match?.[1]?.toLowerCase() ?? "";
+}
+
+function areHistoryFiltersActive(filters: HistoryFilters) {
+  return Boolean(filters.author || filters.type || filters.dateDirection !== defaultHistoryFilters.dateDirection);
+}
+
 function buildGraphRows(commits: Commit[]): GraphRow[] {
   const rows: GraphRow[] = [];
   let lanes: string[] = [];
@@ -3251,7 +3472,23 @@ function refToneClass(ref: RefChip) {
 }
 
 function renderCommitMessage(message: string): ReactNode {
-  const match = message.match(/^(chore|fix|feat|merge)(\([^)]+\))?(!)?:?\s*(.*)$/i);
+  const mergeMatch = message.match(/^(merge)\b\s*(.*)$/i);
+  if (mergeMatch) {
+    const [, type, body] = mergeMatch;
+    return (
+      <>
+        <span className="commit-type">{type}</span>
+        {body && (
+          <>
+            <span className="commit-separator"> </span>
+            <span className="commit-body">{body}</span>
+          </>
+        )}
+      </>
+    );
+  }
+
+  const match = message.match(/^([a-z][a-z0-9-]*)(\([^)]+\))?(!)?:\s*(.*)$/i);
   if (!match) return <span className="commit-body">{message}</span>;
 
   const [, type, scope, bang, body] = match;
