@@ -18,7 +18,8 @@
     "test:rust": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "check": "npm run typecheck && npm run build && npm run test",
     "tauri:dev": "npm --workspace apps/desktop run tauri:dev",
-    "tauri:build": "npm --workspace apps/desktop run tauri:build"
+    "tauri:build": "npm --workspace apps/desktop run tauri:build",
+    "tauri:build:mac-app": "npm --workspace apps/desktop run tauri:build:mac-app"
   },
   "engines": {
     "node": ">=22.0.0",

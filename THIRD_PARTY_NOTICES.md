@@ -6,7 +6,7 @@ OpenGit is licensed under MIT. Third-party dependencies remain under their own l
 
 ## Primary Runtime Dependencies
 
-- Tauri v2 and Tauri plugins: MIT or Apache-2.0, depending on package.
+- Tauri v2 and Tauri plugins, including dialog and updater: MIT or Apache-2.0, depending on package.
 - React and React DOM: MIT.
 - Vite: MIT.
 - TypeScript: Apache-2.0.

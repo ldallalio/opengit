@@ -6,6 +6,14 @@ It is an original open-source project for developers who want a polished Git GUI
 
 > Status: alpha. OpenGit is usable for local workflows, but it is not production-stable yet and signed binary releases are not available.
 
+## Releases
+
+The first public alpha is published as a source-only prerelease:
+
+- [OpenGit v0.1.0-alpha.1](https://github.com/ldallalio/opengit/releases/tag/v0.1.0-alpha.1)
+
+Future `v*` tags run the Tauri release workflow and create draft prereleases with platform artifacts. Those artifacts are Tauri-updater-signed, but macOS notarization and Windows code signing still require developer signing credentials before they should be treated as end-user production installers.
+
 ## Features
 
 - Open repositories with a native folder picker.
@@ -57,6 +65,18 @@ Run the desktop app:
 
 ```sh
 npm run tauri:dev
+```
+
+Build the local desktop bundle:
+
+```sh
+npm run tauri:build
+```
+
+On macOS, if you only need the `.app` bundle while code signing/notarization is still pending, use:
+
+```sh
+npm run tauri:build:mac-app
 ```
 
 Run the browser preview with demo data:

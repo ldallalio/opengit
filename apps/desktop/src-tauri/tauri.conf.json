@@ -24,8 +24,19 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "targets": "all",
     "category": "DeveloperTool"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFFNzNEMUY2REIwQzA1QzcKUldUSEJRemI5dEZ6cm5HSVFJdFVrbXlJMm44emsvS1VuWFhzUnlhZlVuKzRqcm0zbDFUOVEwQkoK",
+      "endpoints": [
+        "https://github.com/ldallalio/opengit/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
