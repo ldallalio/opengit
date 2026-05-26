@@ -1070,20 +1070,9 @@ async fn build_snapshot(repo: &Path, history_limit: Option<u32>) -> CommandResul
         .await?,
     );
     let commits = parse_commits(
-        &run_git(
-            Some(repo),
-            vec![
-                "log".into(),
-                "--all".into(),
-                "--topo-order".into(),
-                "--date=iso-strict".into(),
-                "--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1e".into(),
-                "-n".into(),
-                history_limit.to_string(),
-            ],
-        )
-        .await
-        .unwrap_or_default(),
+        &run_git(Some(repo), history_log_args(history_limit))
+            .await
+            .unwrap_or_default(),
     );
 
     let worktree_state = detect_worktree_state(repo, &branch_status, &changes).await;
@@ -1778,6 +1767,18 @@ fn parse_commits(raw: &str) -> Vec<Commit> {
         .collect()
 }
 
+fn history_log_args(history_limit: u32) -> Vec<String> {
+    vec![
+        "log".into(),
+        "--all".into(),
+        "--author-date-order".into(),
+        "--date=iso-strict".into(),
+        "--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1e".into(),
+        "-n".into(),
+        history_limit.to_string(),
+    ]
+}
+
 async fn commit_base_ref(repo: &Path, sha: &str) -> CommandResult<String> {
     const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     let output = run_git(
@@ -2435,6 +2436,15 @@ mod tests {
         assert_eq!(clamp_history_limit(Some(1)), MIN_HISTORY_LIMIT);
         assert_eq!(clamp_history_limit(Some(750)), 750);
         assert_eq!(clamp_history_limit(Some(10_000)), MAX_HISTORY_LIMIT);
+    }
+
+    #[test]
+    fn history_log_uses_author_date_order_for_timeline_view() {
+        let args = history_log_args(250);
+
+        assert!(args.contains(&"--author-date-order".to_string()));
+        assert!(!args.contains(&"--topo-order".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("250"));
     }
 
     #[test]
