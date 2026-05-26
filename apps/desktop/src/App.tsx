@@ -11,6 +11,7 @@ import type { Branch, Commit, CommitFile, Conflict, FileChange, FileStatus, Repo
 import { Button, EmptyState, IconButton, Panel } from "@opengit/ui";
 import {
   AlertTriangle,
+  Activity,
   ArrowDownToLine,
   Boxes,
   Check,
@@ -25,6 +26,7 @@ import {
   GitFork,
   GitPullRequest,
   History,
+  Eye,
   Link2,
   Maximize2,
   Minimize2,
@@ -213,7 +215,7 @@ type PreferenceSection =
   | "experimental";
 
 const defaultPath = localStorage.getItem("opengit:lastPath") ?? "/Users/logandallalio/Documents/OpenGit";
-const graphColors = ["#7c68ee", "#6bbf7a", "#5ba0d0", "#e07070", "#e0b060", "#8c7bff", "#5bbf9d", "#ce6ca8", "#7aa5ff", "#b6a8ff"];
+const graphColors = ["#58a6ff", "#b388ff", "#3fb950", "#ff7b72", "#e3b341", "#d2a8ff", "#79c0ff", "#a5d6ff", "#f0883e", "#8b949e"];
 const graphLaneWidth = 16;
 const graphRowHeight = 34;
 const maxVisibleGraphLanes = 12;
@@ -1113,6 +1115,19 @@ export default function App() {
     void runSnapshotOperation("Update commit message", () => updateCommitMessage(repo, selectedCommit.sha, selectedCommitMessage.trim()));
   };
 
+  const selectCommitBySha = (sha: string) => {
+    const commitItem = snapshot?.commits.find((item) => item.sha === sha);
+    if (!commitItem) {
+      setError("That parent commit is outside the loaded history window. Increase the history limit to load it.");
+      return;
+    }
+    setSelectedCommit(commitItem);
+    setSelectedCommitMessage(commitItem.message);
+    setDiffMode("commit");
+    setCenterView("graph");
+    setDiffExpanded(false);
+  };
+
   const stashCurrent = () => {
     const repo = requireRepo();
     if (!repo) return;
@@ -1320,6 +1335,17 @@ export default function App() {
             <Button variant="primary" onClick={openCurrentPath} disabled={loading}>
               Open
             </Button>
+          </div>
+          <div className="topbar-git-actions" aria-label="Git toolbar">
+            <IconButton label="Fetch" onClick={() => snapshot && runSnapshotOperation("Fetch", () => fetchRepo(snapshot.repository.path))} disabled={!snapshot || loading}>
+              <ArrowDownToLine size={15} />
+            </IconButton>
+            <IconButton label="Pull" onClick={() => snapshot && runSnapshotOperation("Pull", () => pullRepo(snapshot.repository.path))} disabled={!snapshot || loading}>
+              <Shuffle size={15} />
+            </IconButton>
+            <IconButton label="Push" onClick={pushCurrentBranch} disabled={!snapshot || loading}>
+              <UploadCloud size={15} />
+            </IconButton>
           </div>
           <div className="layout-controls" aria-label="Layout controls">
             <IconButton
@@ -1530,7 +1556,10 @@ export default function App() {
               activeDiffPath ? (
                 <SplitDiffViewer path={activeDiffPath} diff={activeDiff} loading={activeDiffLoading} />
               ) : (
-                <EmptyState>No file selected</EmptyState>
+                <EmptyState>
+                  <FileText size={24} />
+                  <span>No file selected</span>
+                </EmptyState>
               )
             ) : centerView === "conflict" && snapshot ? (
               <ConflictResolver
@@ -1580,7 +1609,10 @@ export default function App() {
                 <span>{snapshot.changes.length} working tree item(s) ready for the first commit.</span>
               </div>
             ) : (
-              <EmptyState>No repository open</EmptyState>
+              <EmptyState>
+                <PackageOpen size={24} />
+                <span>No repository open</span>
+              </EmptyState>
             )}
           </Panel>
 
@@ -1592,18 +1624,15 @@ export default function App() {
           />
 
           <aside className="detail-stack">
-            <Panel title="Selection" className="selection-panel" actions={<GitCommitHorizontal size={15} />}>
-              {selectedCommit ? (
-                <div className="selection-detail">
-                  <strong>{selectedCommit.message || "(no subject)"}</strong>
-                  <span>{selectedCommit.sha}</span>
-                  <span>{selectedCommit.author}</span>
-                  <span>{selectedCommit.date}</span>
-                  <span>{selectedCommit.parents.length} parent(s)</span>
-                </div>
-              ) : (
-                <EmptyState>No commit selected</EmptyState>
-              )}
+            <Panel title="Commit Detail" className="selection-panel" actions={<GitCommitHorizontal size={15} />}>
+              <CommitDetail
+                commit={selectedCommit}
+                files={commitFiles}
+                filesLoading={commitFilesLoading}
+                fileError={commitFileError}
+                onSelectParent={selectCommitBySha}
+                onSelectFile={openCommitDiff}
+              />
             </Panel>
             <ResizeHandle
               className="detail-stack-resize"
@@ -1668,7 +1697,10 @@ export default function App() {
                   />
                 </div>
               ) : (
-                <EmptyState>No working tree loaded</EmptyState>
+                <EmptyState>
+                  <ClipboardList size={24} />
+                  <span>No working tree loaded</span>
+                </EmptyState>
               )}
             </Panel>
             <ResizeHandle
@@ -1715,22 +1747,24 @@ export default function App() {
                   placeholder="Commit message"
                   aria-label="Commit message"
                 />
-                <Button
-                  className="ai-generate-button"
-                  variant="secondary"
-                  disabled={!snapshot || loading || aiGeneratingCommit || stagedChanges.length === 0}
-                  onClick={() => void generateCommitMessage()}
-                >
-                  <Sparkles size={13} />
-                  {aiGeneratingCommit ? "Generating" : "Generate Message"}
-                </Button>
                 <label className="check-row">
                   <input type="checkbox" checked={amend} onChange={(event) => setAmend(event.target.checked)} />
                   Amend
                 </label>
-                <Button variant="primary" disabled={!snapshot || loading || !commitMessage.trim()} onClick={commitChanges}>
-                  Commit
-                </Button>
+                <div className="commit-footer">
+                  <Button
+                    className="ai-generate-button"
+                    variant="secondary"
+                    disabled={!snapshot || loading || aiGeneratingCommit || stagedChanges.length === 0}
+                    onClick={() => void generateCommitMessage()}
+                  >
+                    <Sparkles size={13} />
+                    {aiGeneratingCommit ? "Generating" : "Generate Message"}
+                  </Button>
+                  <Button className="commit-submit-button" variant="primary" disabled={!snapshot || loading || !commitMessage.trim()} onClick={commitChanges}>
+                    Commit
+                  </Button>
+                </div>
               </div>
             </Panel>
             <ResizeHandle
@@ -1740,7 +1774,7 @@ export default function App() {
               onPointerDown={(event) => startResize("bottomOperations", event)}
             />
 
-            <Panel title="Operations" className="operations-panel">
+            <Panel title="Activity" className="operations-panel" actions={<Activity size={15} />}>
               <div className="operation-log">
                 {operationLog.map((entry, index) => (
                   <span key={`${entry}-${index}`}>{entry}</span>
@@ -1953,7 +1987,12 @@ function BranchSwitcher({
             {branch.isRemote && <small>remote</small>}
           </button>
         ))}
-        {branches.length === 0 && <EmptyState>No branches match</EmptyState>}
+        {branches.length === 0 && (
+          <EmptyState>
+            <GitBranch size={24} />
+            <span>No branches match</span>
+          </EmptyState>
+        )}
       </div>
     </div>
   );
@@ -2053,10 +2092,16 @@ function Sidebar({
                 </div>
               ))
             ) : (
-              <EmptyState>No branches match</EmptyState>
+              <EmptyState>
+                <GitBranch size={24} />
+                <span>No branches match</span>
+              </EmptyState>
             )
           ) : (
-            <EmptyState>No branches</EmptyState>
+            <EmptyState>
+              <GitBranch size={24} />
+              <span>No branches</span>
+            </EmptyState>
           )}
         </div>
       </Panel>
@@ -2084,7 +2129,10 @@ function Sidebar({
               </div>
             ))
           ) : (
-            <EmptyState>No remotes</EmptyState>
+            <EmptyState>
+              <Boxes size={24} />
+              <span>No remotes</span>
+            </EmptyState>
           )}
         </div>
       </Panel>
@@ -2116,7 +2164,10 @@ function Sidebar({
               </div>
             ))
           ) : (
-            <EmptyState>No stashes</EmptyState>
+            <EmptyState>
+              <PackageOpen size={24} />
+              <span>No stashes</span>
+            </EmptyState>
           )}
         </div>
       </Panel>
@@ -2128,7 +2179,10 @@ function Sidebar({
       />
 
       <Panel title="Pull Requests" className="sidebar-pull-requests-panel" actions={<GitPullRequest size={15} />}>
-        <EmptyState>GitHub adapter pending</EmptyState>
+        <EmptyState>
+          <GitPullRequest size={24} />
+          <span>GitHub adapter pending</span>
+        </EmptyState>
       </Panel>
     </aside>
   );
@@ -2301,18 +2355,26 @@ function CommitGraphTable({
           >
             <span className="branch-tag-cell">
               {row.refs.length > 0 ? (
-                row.refs.slice(0, 3).map((ref) => (
-                  <button
-                    key={`${row.commit.sha}-${ref.label}`}
-                    className={clsx("ref-chip", ref.kind, refToneClass(ref))}
-                    style={{ "--ref-color": ref.color } as CSSProperties}
-                    type="button"
-                    aria-haspopup="menu"
-                    onClick={(event) => onOpenBranchMenu(targetFromRef(ref, row.commit, snapshot), event)}
-                  >
-                    {ref.label}
-                  </button>
-                ))
+                <>
+                  {row.refs.slice(0, 2).map((ref) => (
+                    <button
+                      key={`${row.commit.sha}-${ref.label}`}
+                      className={clsx("ref-chip", ref.kind, refToneClass(ref))}
+                      style={{ "--ref-color": ref.color } as CSSProperties}
+                      type="button"
+                      aria-haspopup="menu"
+                      title={ref.raw}
+                      onClick={(event) => onOpenBranchMenu(targetFromRef(ref, row.commit, snapshot), event)}
+                    >
+                      {ref.label}
+                    </button>
+                  ))}
+                  {row.refs.length > 2 && (
+                    <span className="ref-chip ref-chip-overflow" title={row.refs.slice(2).map((ref) => ref.raw).join(", ")}>
+                      +{row.refs.length - 2}
+                    </span>
+                  )}
+                </>
               ) : (
                 <span className="ref-placeholder" />
               )}
@@ -2471,6 +2533,83 @@ function CommitGraphSvg({ row, width, laneCount }: { row: GraphRow; width: numbe
   );
 }
 
+function CommitDetail({
+  commit,
+  files,
+  filesLoading,
+  fileError,
+  onSelectParent,
+  onSelectFile
+}: {
+  commit: Commit | null;
+  files: CommitFile[];
+  filesLoading: boolean;
+  fileError: string | null;
+  onSelectParent: (sha: string) => void;
+  onSelectFile: (file: CommitFile) => void;
+}) {
+  if (!commit) {
+    return (
+      <EmptyState>
+        <GitCommitHorizontal size={24} />
+        <span>No commit selected</span>
+      </EmptyState>
+    );
+  }
+
+  return (
+    <div className="selection-detail commit-detail-card">
+      <div className="commit-detail-author">
+        <span className="author-avatar" aria-hidden="true">{authorInitials(commit.author)}</span>
+        <div>
+          <strong>{commit.author}</strong>
+          <span>{formatDateTime(commit.date)}</span>
+        </div>
+      </div>
+      <p className="commit-detail-message">{commit.message || "(no subject)"}</p>
+      <dl className="commit-detail-meta">
+        <div>
+          <dt>Hash</dt>
+          <dd title={commit.sha}>{shortSha(commit.sha)}</dd>
+        </div>
+        <div>
+          <dt>Parents</dt>
+          <dd>{commit.parents.length}</dd>
+        </div>
+      </dl>
+      {commit.parents.length > 0 && (
+        <div className="commit-parent-links" aria-label="Parent commits">
+          {commit.parents.map((parent) => (
+            <button key={parent} type="button" onClick={() => onSelectParent(parent)} title={parent}>
+              {shortSha(parent)}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="commit-detail-files">
+        <div className="commit-detail-files-header">
+          <span>Changed files</span>
+          <small>{files.length}</small>
+        </div>
+        {filesLoading ? (
+          <span className="commit-detail-note">Loading changed files</span>
+        ) : fileError ? (
+          <span className="commit-detail-note error">{fileError}</span>
+        ) : files.length > 0 ? (
+          files.slice(0, 5).map((file) => (
+            <button key={`${file.status}-${file.oldPath ?? ""}-${file.path}`} type="button" onClick={() => onSelectFile(file)}>
+              <span className={clsx("status-chip", file.status)}>{statusLabel(file)}</span>
+              <span>{file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path}</span>
+            </button>
+          ))
+        ) : (
+          <span className="commit-detail-note">No changed files</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CommitFileList({
   files,
   selected,
@@ -2485,7 +2624,12 @@ function CommitFileList({
   onSelect: (file: CommitFile) => void;
 }) {
   if (loading) {
-    return <EmptyState>Loading changed files</EmptyState>;
+    return (
+      <EmptyState>
+        <ClipboardList size={24} />
+        <span>Loading changed files</span>
+      </EmptyState>
+    );
   }
 
   if (error) {
@@ -2493,7 +2637,12 @@ function CommitFileList({
   }
 
   if (files.length === 0) {
-    return <EmptyState>No files changed for this commit</EmptyState>;
+    return (
+      <EmptyState>
+        <FileText size={24} />
+        <span>No files changed for this commit</span>
+      </EmptyState>
+    );
   }
 
   return (
@@ -2536,6 +2685,8 @@ function ChangeColumn({
   primaryLabel: string;
   secondaryAction: (change: FileChange) => void;
 }) {
+  const emptyLabel = title.toLowerCase().startsWith("staged") ? "No staged changes" : "No unstaged changes";
+
   return (
     <div className="change-column">
       <div className="change-column-header">
@@ -2572,6 +2723,15 @@ function ChangeColumn({
                 <Check size={13} />
               </IconButton>
               <IconButton
+                label="View diff"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelect(change);
+                }}
+              >
+                <Eye size={13} />
+              </IconButton>
+              <IconButton
                 label="Discard"
                 onClick={(event) => {
                   event.stopPropagation();
@@ -2583,7 +2743,12 @@ function ChangeColumn({
             </span>
           </div>
         ))}
-        {changes.length === 0 && <EmptyState>None</EmptyState>}
+        {changes.length === 0 && (
+          <EmptyState>
+            <ClipboardList size={24} />
+            <span>{emptyLabel}</span>
+          </EmptyState>
+        )}
       </div>
     </div>
   );
@@ -2681,7 +2846,10 @@ function ConflictResolver({
             </button>
           ))
         ) : (
-          <EmptyState>No unresolved files</EmptyState>
+          <EmptyState>
+            <Check size={24} />
+            <span>No unresolved files</span>
+          </EmptyState>
         )}
       </aside>
 
@@ -2710,7 +2878,10 @@ function ConflictResolver({
         {error ? (
           <div className="inline-error">{error}</div>
         ) : loading ? (
-          <EmptyState>Loading conflict versions</EmptyState>
+          <EmptyState>
+            <AlertTriangle size={24} />
+            <span>Loading conflict versions</span>
+          </EmptyState>
         ) : selectedConflict && versions ? (
           <div className="conflict-panes">
             <ConflictPane title="Current" text={versions.ours} />
@@ -2751,7 +2922,10 @@ function SplitDiffViewer({ path, diff, loading = false }: { path: string; diff: 
     <div className="diff-shell">
       <div className="diff-title">{path}</div>
       {loading ? (
-        <EmptyState>Loading diff</EmptyState>
+        <EmptyState>
+          <FileText size={24} />
+          <span>Loading diff</span>
+        </EmptyState>
       ) : rows.length > 0 ? (
         <div className="visual-diff-view">
           <div className="visual-diff-grid">
@@ -2778,7 +2952,10 @@ function SplitDiffViewer({ path, diff, loading = false }: { path: string; diff: 
           </div>
         </div>
       ) : (
-        <EmptyState>No diff available</EmptyState>
+        <EmptyState>
+          <FileText size={24} />
+          <span>No diff available</span>
+        </EmptyState>
       )}
     </div>
   );
@@ -3040,7 +3217,10 @@ function PreferencesPanel({
                   </div>
                 ))
               ) : (
-                <EmptyState>No recent repositories yet</EmptyState>
+                <EmptyState>
+                  <FolderOpen size={24} />
+                  <span>No recent repositories yet</span>
+                </EmptyState>
               )}
             </div>
           </PreferenceSection>
@@ -3436,26 +3616,28 @@ function colorForId(value: string) {
 
 function refColor(label: string, kind: RefKind) {
   const tone = refTone(label);
-  if (tone === "integrate") return "#6bbf7a";
-  if (tone === "origin-master") return "#5ba0d0";
-  if (tone === "bug") return "#e07070";
-  if (kind === "tag") return "#e0b060";
-  if (kind === "head") return "#7c68ee";
+  if (kind === "remote") return "#8b949e";
+  if (kind === "tag" || tone === "release") return "#e3b341";
+  if (tone === "main") return "#79c0ff";
+  if (tone === "wip") return "#ff7b72";
+  if (kind === "head") return "#b388ff";
   return colorForId(label);
 }
 
 function refTone(label: string) {
   const normalized = label.toLowerCase();
-  if (normalized === "integrate" || normalized.endsWith("/integrate")) return "integrate";
+  if (normalized.includes("wip")) return "wip";
+  if (normalized.includes("release") || /^v?\d+\.\d+/.test(normalized)) return "release";
+  if (normalized === "integrate" || normalized.endsWith("/integrate")) return "main";
   if (normalized === "origin/master" || normalized === "origin/main" || normalized === "master" || normalized === "main" || normalized.endsWith("/master") || normalized.endsWith("/main")) {
-    return "origin-master";
+    return "main";
   }
-  if (normalized.includes("bug") || normalized.includes("fix")) return "bug";
   return "feature";
 }
 
 function refToneClass(ref: RefChip) {
-  if (ref.kind === "tag") return "tag-tone";
+  if (ref.kind === "remote") return "remote-tone";
+  if (ref.kind === "tag") return "release-tone";
   return `${refTone(ref.label)}-tone`;
 }
 
@@ -3465,7 +3647,7 @@ function renderCommitMessage(message: string): ReactNode {
     const [, type, body] = mergeMatch;
     return (
       <>
-        <span className="commit-type">{type}</span>
+        <span className="commit-type commit-type-merge">{type}</span>
         {body && (
           <>
             <span className="commit-separator"> </span>
@@ -3480,11 +3662,12 @@ function renderCommitMessage(message: string): ReactNode {
   if (!match) return <span className="commit-body">{message}</span>;
 
   const [, type, scope, bang, body] = match;
+  const normalizedType = type.toLowerCase();
   return (
     <>
-      <span className="commit-type">{type}</span>
+      <span className={clsx("commit-type", `commit-type-${normalizedType}`)}>{type}</span>
       {scope && <span className="commit-scope">{scope}</span>}
-      {bang && <span className="commit-type">{bang}</span>}
+      {bang && <span className={clsx("commit-type", `commit-type-${normalizedType}`)}>{bang}</span>}
       {body && (
         <>
           <span className="commit-separator"> </span>
@@ -3791,6 +3974,17 @@ function repoNameFromPath(path: string) {
 
 function shortSha(sha: string) {
   return sha.slice(0, 7);
+}
+
+function authorInitials(author: string) {
+  const initials = author
+    .split(/\s+/)
+    .map((part) => part[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+  return initials || "?";
 }
 
 function formatDate(value: string) {
