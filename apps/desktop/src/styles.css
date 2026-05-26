@@ -873,6 +873,25 @@ body.resizing-layout-horizontal {
   border-bottom: 1px solid var(--border);
 }
 
+.branch-filter {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--quiet);
+}
+
+.branch-filter:focus-within {
+  color: var(--accent);
+}
+
+.branch-filter input {
+  height: 30px;
+  font-size: 10px;
+}
+
 .remote-create {
   display: grid;
   grid-template-columns: 74px minmax(0, 1fr) 30px;

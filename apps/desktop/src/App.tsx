@@ -349,7 +349,7 @@ export default function App() {
   const [azureDevOpsConfigured, setAzureDevOpsConfigured] = useState(false);
   const [preferredIntegration, setPreferredIntegration] = useState("OpenAI");
   const [aiGeneratingCommit, setAiGeneratingCommit] = useState(false);
-  const [branchName, setBranchName] = useState("");
+  const [sidebarBranchFilter, setSidebarBranchFilter] = useState("");
   const [remoteName, setRemoteName] = useState("origin");
   const [remoteUrl, setRemoteUrl] = useState("");
   const [stashMessage, setStashMessage] = useState("");
@@ -1113,12 +1113,6 @@ export default function App() {
     void runSnapshotOperation("Update commit message", () => updateCommitMessage(repo, selectedCommit.sha, selectedCommitMessage.trim()));
   };
 
-  const branchCreate = () => {
-    const repo = requireRepo();
-    if (!repo || !branchName.trim()) return;
-    void runSnapshotOperation("Create branch", () => createBranch(repo, branchName.trim(), true)).then(() => setBranchName(""));
-  };
-
   const stashCurrent = () => {
     const repo = requireRepo();
     if (!repo) return;
@@ -1425,15 +1419,14 @@ export default function App() {
         >
           <Sidebar
             snapshot={snapshot}
-            branchName={branchName}
+            sidebarBranchFilter={sidebarBranchFilter}
             stashMessage={stashMessage}
-            setBranchName={setBranchName}
+            setSidebarBranchFilter={setSidebarBranchFilter}
             remoteName={remoteName}
             remoteUrl={remoteUrl}
             setRemoteName={setRemoteName}
             setRemoteUrl={setRemoteUrl}
             setStashMessage={setStashMessage}
-            createBranch={branchCreate}
             addRemote={addRepositoryRemote}
             stashCurrent={stashCurrent}
             deleteBranch={(name) => {
@@ -1989,15 +1982,14 @@ function ResizeHandle({
 
 function Sidebar({
   snapshot,
-  branchName,
+  sidebarBranchFilter,
   remoteName,
   remoteUrl,
   stashMessage,
-  setBranchName,
+  setSidebarBranchFilter,
   setRemoteName,
   setRemoteUrl,
   setStashMessage,
-  createBranch,
   addRemote,
   stashCurrent,
   deleteBranch,
@@ -2007,15 +1999,14 @@ function Sidebar({
   startResize
 }: {
   snapshot: RepoSnapshot | null;
-  branchName: string;
+  sidebarBranchFilter: string;
   remoteName: string;
   remoteUrl: string;
   stashMessage: string;
-  setBranchName: (value: string) => void;
+  setSidebarBranchFilter: (value: string) => void;
   setRemoteName: (value: string) => void;
   setRemoteUrl: (value: string) => void;
   setStashMessage: (value: string) => void;
-  createBranch: () => void;
   addRemote: () => void;
   stashCurrent: () => void;
   deleteBranch: (name: string) => void;
@@ -2024,36 +2015,46 @@ function Sidebar({
   openBranchMenu: (target: BranchMenuTarget, event: ReactMouseEvent<HTMLElement>) => void;
   startResize: (target: ResizeTarget, event: ReactPointerEvent) => void;
 }) {
+  const branchRows = snapshot ? filterBranches(displayBranches(snapshot), sidebarBranchFilter) : [];
+
   return (
     <aside className="sidebar">
       <Panel title="Branches" className="sidebar-branches-panel" actions={<GitBranch size={15} />}>
-        <div className="inline-create">
-          <input value={branchName} onChange={(event) => setBranchName(event.target.value)} aria-label="New branch name" />
-          <IconButton label="Create branch" onClick={createBranch}>
-            <Plus size={15} />
-          </IconButton>
+        <div className="branch-filter">
+          <Search size={13} aria-hidden="true" />
+          <input
+            value={sidebarBranchFilter}
+            onChange={(event) => setSidebarBranchFilter(event.target.value)}
+            aria-label="Filter branches"
+            placeholder="Filter branches"
+            disabled={!snapshot}
+          />
         </div>
         <div className="nav-list">
           {snapshot ? (
-            displayBranches(snapshot).map((branch) => (
-              <div key={branch.fullRef} className={clsx("nav-row", branch.isCurrent && "active")}>
-                <button
-                  onClick={(event) => openBranchMenu(targetFromBranch(branch, "sidebar"), event)}
-                  aria-haspopup="menu"
-                  disabled={branch.isUnborn}
-                >
-                  <ChevronRight size={13} />
-                  <span>{branch.name}</span>
-                  {branch.isUnborn && <small>unborn</small>}
-                  {branch.isRemote && <small>remote</small>}
-                </button>
-                {!branch.isProtected && !branch.isCurrent && !branch.isUnborn && !branch.isRemote && (
-                  <IconButton label="Delete branch" onClick={() => deleteBranch(branch.name)}>
-                    <Trash2 size={13} />
-                  </IconButton>
-                )}
-              </div>
-            ))
+            branchRows.length > 0 ? (
+              branchRows.map((branch) => (
+                <div key={branch.fullRef} className={clsx("nav-row", branch.isCurrent && "active")}>
+                  <button
+                    onClick={(event) => openBranchMenu(targetFromBranch(branch, "sidebar"), event)}
+                    aria-haspopup="menu"
+                    disabled={branch.isUnborn}
+                  >
+                    <ChevronRight size={13} />
+                    <span>{branch.name}</span>
+                    {branch.isUnborn && <small>unborn</small>}
+                    {branch.isRemote && <small>remote</small>}
+                  </button>
+                  {!branch.isProtected && !branch.isCurrent && !branch.isUnborn && !branch.isRemote && (
+                    <IconButton label="Delete branch" onClick={() => deleteBranch(branch.name)}>
+                      <Trash2 size={13} />
+                    </IconButton>
+                  )}
+                </div>
+              ))
+            ) : (
+              <EmptyState>No branches match</EmptyState>
+            )
           ) : (
             <EmptyState>No branches</EmptyState>
           )}
