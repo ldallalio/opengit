@@ -251,6 +251,7 @@ struct ConflictVersions {
     ours: String,
     theirs: String,
     working: String,
+    diff: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1200,12 +1201,25 @@ async fn git_conflict_versions(repo_path: String, path: String) -> CommandResult
     let mut safe_paths = validate_file_paths(&[path])?;
     let path = safe_paths.remove(0);
     let working = std::fs::read_to_string(repo.join(&path)).unwrap_or_default();
+    let diff = run_git(
+        Some(&repo),
+        vec![
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--minimal".into(),
+            "--".into(),
+            path.clone(),
+        ],
+    )
+    .await
+    .unwrap_or_default();
 
     Ok(ConflictVersions {
         base: git_show_stage(&repo, 1, &path).await.unwrap_or_default(),
         ours: git_show_stage(&repo, 2, &path).await.unwrap_or_default(),
         theirs: git_show_stage(&repo, 3, &path).await.unwrap_or_default(),
         working,
+        diff,
         path,
     })
 }
@@ -2376,8 +2390,8 @@ fn parse_status(raw: &str) -> (BranchStatus, Vec<FileChange>, Vec<Conflict>) {
             continue;
         }
         if record.starts_with("u ") {
-            let parts: Vec<&str> = record.splitn(12, ' ').collect();
-            if let (Some(xy), Some(path)) = (parts.get(1), parts.get(11)) {
+            let parts: Vec<&str> = record.splitn(11, ' ').collect();
+            if let (Some(xy), Some(path)) = (parts.get(1), parts.get(10)) {
                 let change = change_from_xy(path, None, xy, None);
                 conflicts.push(Conflict {
                     path: (*path).to_string(),
@@ -3717,7 +3731,7 @@ mod tests {
         let raw = concat!(
             "# branch.oid abc123\0",
             "# branch.head main\0",
-            "u UU N... 100644 100644 100644 100644 aaa bbb ccc ddd src/conflict.ts\0"
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc src/conflict.ts\0"
         );
 
         let (_branch, changes, conflicts) = parse_status(raw);
@@ -3725,6 +3739,24 @@ mod tests {
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].path, "src/conflict.ts");
         assert_eq!(conflicts[0].kind, "UU");
+        assert!(matches!(changes[0].status, FileStatus::Conflicted));
+    }
+
+    #[test]
+    fn parses_porcelain_v2_conflict_paths_with_spaces() {
+        let raw = concat!(
+            "# branch.oid abc123\0",
+            "# branch.head main\0",
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc src/conflicted folder/file name.tsx\0"
+        );
+
+        let (_branch, changes, conflicts) = parse_status(raw);
+
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(
+            conflicts[0].path,
+            "src/conflicted folder/file name.tsx"
+        );
         assert!(matches!(changes[0].status, FileStatus::Conflicted));
     }
 

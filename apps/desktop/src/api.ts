@@ -37,6 +37,7 @@ export type ConflictVersions = {
   ours: string;
   theirs: string;
   working: string;
+  diff: string;
 };
 
 export type ConflictStrategy = "ours" | "theirs" | "both";
@@ -226,7 +227,7 @@ export const getCommitFileDiff = (repoPath: string, sha: string, path: string, o
   call<string>("git_commit_file_diff", { repoPath, sha, path, oldPath }, demoDiff);
 
 export const getConflictVersions = (repoPath: string, path: string) =>
-  call<ConflictVersions>("git_conflict_versions", { repoPath, path }, { path, base: "", ours: "", theirs: "", working: "" });
+  call<ConflictVersions>("git_conflict_versions", { repoPath, path }, { path, base: "", ours: "", theirs: "", working: "", diff: "" });
 
 export const resolveConflict = (repoPath: string, path: string, strategy: ConflictStrategy) =>
   call<RepoSnapshot>("git_conflict_resolve", { repoPath, path, strategy }, demoSnapshot);

@@ -3106,7 +3106,7 @@ function ConflictResolver({
           <div className="conflict-panes">
             <ConflictPane title="Current" text={versions.ours} />
             <ConflictPane title="Incoming" text={versions.theirs} />
-            <ConflictPane title="Result" text={versions.working} large />
+            <ConflictPane title="Result" text={versions.working} diff={versions.diff} large />
           </div>
         ) : (
           <div className="conflict-complete">
@@ -3126,11 +3126,13 @@ function ConflictResolver({
   );
 }
 
-function ConflictPane({ title, text, large = false }: { title: string; text: string; large?: boolean }) {
+function ConflictPane({ title, text, diff, large = false }: { title: string; text: string; diff?: string; large?: boolean }) {
+  const diffRows = useMemo(() => parseSplitDiff(diff ?? ""), [diff]);
+
   return (
     <div className={clsx("conflict-pane", large && "large")}>
       <div className="conflict-pane-title">{title}</div>
-      <pre>{text || "(empty)"}</pre>
+      {diffRows.length > 0 ? <VisualDiff rows={diffRows} /> : <pre>{text || "(empty)"}</pre>}
     </div>
   );
 }
@@ -3147,36 +3149,42 @@ function SplitDiffViewer({ path, diff, loading = false }: { path: string; diff: 
           <span>Loading diff</span>
         </EmptyState>
       ) : rows.length > 0 ? (
-        <div className="visual-diff-view">
-          <div className="visual-diff-grid">
-            <div className="diff-side-header">Old</div>
-            <div className="diff-side-header">New</div>
-            {rows.map((row, index) =>
-              row.kind === "hunk" ? (
-                <div key={`${row.header}-${index}`} className="diff-hunk-row">
-                  {row.header}
-                </div>
-              ) : (
-                <div key={`${row.leftNumber ?? "-"}-${row.rightNumber ?? "-"}-${index}`} className="diff-row">
-                  <div className={clsx("diff-line-number", lineClass(row.kind, "left"))}>{row.leftNumber ?? ""}</div>
-                  <div className={clsx("diff-code", lineClass(row.kind, "left"))}>
-                    {row.leftText ?? ""}
-                  </div>
-                  <div className={clsx("diff-line-number", lineClass(row.kind, "right"))}>{row.rightNumber ?? ""}</div>
-                  <div className={clsx("diff-code", lineClass(row.kind, "right"))}>
-                    {row.rightText ?? ""}
-                  </div>
-                </div>
-              )
-            )}
-          </div>
-        </div>
+        <VisualDiff rows={rows} />
       ) : (
         <EmptyState>
           <FileText size={24} />
           <span>No diff available</span>
         </EmptyState>
       )}
+    </div>
+  );
+}
+
+function VisualDiff({ rows }: { rows: SplitDiffRow[] }) {
+  return (
+    <div className="visual-diff-view">
+      <div className="visual-diff-grid">
+        <div className="diff-side-header">Old</div>
+        <div className="diff-side-header">New</div>
+        {rows.map((row, index) =>
+          row.kind === "hunk" ? (
+            <div key={`${row.header}-${index}`} className="diff-hunk-row">
+              {row.header}
+            </div>
+          ) : (
+            <div key={`${row.leftNumber ?? "-"}-${row.rightNumber ?? "-"}-${index}`} className="diff-row">
+              <div className={clsx("diff-line-number", lineClass(row.kind, "left"))}>{row.leftNumber ?? ""}</div>
+              <div className={clsx("diff-code", lineClass(row.kind, "left"))}>
+                {row.leftText ?? ""}
+              </div>
+              <div className={clsx("diff-line-number", lineClass(row.kind, "right"))}>{row.rightNumber ?? ""}</div>
+              <div className={clsx("diff-code", lineClass(row.kind, "right"))}>
+                {row.rightText ?? ""}
+              </div>
+            </div>
+          )
+        )}
+      </div>
     </div>
   );
 }
