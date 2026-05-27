@@ -7,7 +7,7 @@ import {
   useMemo,
   useState
 } from "react";
-import type { Branch, Commit, CommitFile, Conflict, FileChange, FileStatus, RepoSnapshot } from "@opengit/core";
+import type { Branch, Commit, CommitFile, Conflict, FileChange, FileStatus, RepoSnapshot, UndoSnapshot } from "@opengit/core";
 import { Button, EmptyState, IconButton, Panel } from "@opengit/ui";
 import {
   AlertTriangle,
@@ -66,7 +66,9 @@ import {
   getConflictVersions,
   getAzureDevOpsStatus,
   getOpenAiStatus,
+  generateAiBranchName,
   generateAiCommitMessage,
+  generateAiPrDescription,
   getDiff,
   isTauriRuntime,
   mergeBranch,
@@ -87,11 +89,15 @@ import {
   stashDrop,
   stashPush,
   clearOpenAiApiKey,
+  restoreUndoSnapshot,
+  squashLastCommits,
   testOpenAiApiKey,
   updateCommitMessage,
+  undoLastCommit,
   unstagePaths,
   OpenGitApiError,
   resolveConflict,
+  type AiPrDescriptionSuggestion,
   type ConflictStrategy,
   type ConflictVersions
 } from "./api";
@@ -351,6 +357,9 @@ export default function App() {
   const [azureDevOpsConfigured, setAzureDevOpsConfigured] = useState(false);
   const [preferredIntegration, setPreferredIntegration] = useState("OpenAI");
   const [aiGeneratingCommit, setAiGeneratingCommit] = useState(false);
+  const [aiGeneratingBranch, setAiGeneratingBranch] = useState(false);
+  const [aiGeneratingPr, setAiGeneratingPr] = useState(false);
+  const [aiPrDraft, setAiPrDraft] = useState<AiPrDescriptionSuggestion | null>(null);
   const [sidebarBranchFilter, setSidebarBranchFilter] = useState("");
   const [remoteName, setRemoteName] = useState("origin");
   const [remoteUrl, setRemoteUrl] = useState("");
@@ -1097,22 +1106,113 @@ export default function App() {
     }
   };
 
+  const generateBranchName = async () => {
+    const repo = requireRepo();
+    if (!repo) return;
+
+    setAiGeneratingBranch(true);
+    setError(null);
+    try {
+      const suggestion = await generateAiBranchName(repo, openAiModel);
+      const nextName = window.prompt("Create branch from AI suggestion", suggestion.name);
+      if (!nextName?.trim()) return;
+      await runSnapshotOperation("Create AI-named branch", () => createBranch(repo, nextName.trim(), true));
+      setOperationLog((log) => ["Generated branch name from current changes", ...log].slice(0, 8));
+    } catch (operationError) {
+      const message = operationError instanceof Error ? operationError.message : String(operationError);
+      setError(message);
+      setOperationLog((log) => [`AI branch name failed: ${message}`, ...log].slice(0, 8));
+      if (operationError instanceof OpenGitApiError && operationError.code === "OPENAI_KEY_MISSING") {
+        setOpenAiConfigured(false);
+        setPreferencesSection("integrations");
+        setPreferencesOpen(true);
+      }
+    } finally {
+      setAiGeneratingBranch(false);
+    }
+  };
+
+  const generatePrDescription = async () => {
+    const repo = requireRepo();
+    if (!repo) return;
+
+    setAiGeneratingPr(true);
+    setError(null);
+    try {
+      const suggestion = await generateAiPrDescription(repo, openAiModel);
+      setAiPrDraft(suggestion);
+      setOperationLog((log) => ["Generated PR title and description from branch diff", ...log].slice(0, 8));
+    } catch (operationError) {
+      const message = operationError instanceof Error ? operationError.message : String(operationError);
+      setError(message);
+      setOperationLog((log) => [`AI PR text failed: ${message}`, ...log].slice(0, 8));
+      if (operationError instanceof OpenGitApiError && operationError.code === "OPENAI_KEY_MISSING") {
+        setOpenAiConfigured(false);
+        setPreferencesSection("integrations");
+        setPreferencesOpen(true);
+      }
+    } finally {
+      setAiGeneratingPr(false);
+    }
+  };
+
   const updateSelectedCommitMessage = () => {
     const repo = requireRepo();
     if (!repo || !selectedCommit) return;
-    if (!selectedCommitIsHead) {
-      setError("Only the HEAD commit message can be updated safely right now. Older commit rewording needs a guarded rebase flow.");
+    if (selectedCommitIsHead && stagedChanges.length > 0) {
+      setError("Unstage files before updating the HEAD commit message so staged changes are not amended into it.");
       return;
     }
-    if (stagedChanges.length > 0) {
-      setError("Unstage files before updating the HEAD commit message so staged changes are not amended into it.");
+    if (!selectedCommitIsHead && (snapshot?.changes.length ?? 0) > 0) {
+      setError("Older commit editing requires a clean working tree. Commit, stash, or discard local changes first.");
       return;
     }
     if (!selectedCommitMessage.trim()) {
       setError("Commit message is required.");
       return;
     }
+    if (!selectedCommitIsHead) {
+      const confirmed = window.confirm(
+        "Reword this older commit? OpenGit will create a safety snapshot, then rewrite the current branch's linear history. If the branch was pushed, you may need force-with-lease."
+      );
+      if (!confirmed) return;
+    }
     void runSnapshotOperation("Update commit message", () => updateCommitMessage(repo, selectedCommit.sha, selectedCommitMessage.trim()));
+  };
+
+  const undoLastCommitAction = () => {
+    const repo = requireRepo();
+    if (!repo) return;
+    if (!window.confirm("Undo the last commit and keep its changes unstaged? OpenGit will create a safety snapshot first.")) return;
+    void runSnapshotOperation("Undo last commit", () => undoLastCommit(repo));
+  };
+
+  const squashLastCommitsAction = () => {
+    const repo = requireRepo();
+    if (!repo) return;
+    const defaultMessage = selectedCommitMessage.trim() || selectedCommit?.message || snapshot?.commits[0]?.message || "";
+    const message = window.prompt("Message for squashed commit", defaultMessage);
+    if (!message?.trim()) return;
+    if (!window.confirm("Squash the last two linear commits? OpenGit will create a safety snapshot first.")) return;
+    void runSnapshotOperation("Squash last commits", () => squashLastCommits(repo, message.trim()));
+  };
+
+  const restoreUndoSnapshotAction = (snapshotId: string, label: string) => {
+    const repo = requireRepo();
+    if (!repo) return;
+    if (!window.confirm(`Restore safety snapshot '${label}'? Current HEAD and patches will be snapshotted first.`)) return;
+    void runSnapshotOperation("Restore safety snapshot", () => restoreUndoSnapshot(repo, snapshotId));
+  };
+
+  const copyPrDraft = async () => {
+    if (!aiPrDraft) return;
+    const body = `${aiPrDraft.title}\n\n${aiPrDraft.description}`.trim();
+    try {
+      await navigator.clipboard.writeText(body);
+      setOperationLog((log) => ["Copied PR draft", ...log].slice(0, 8));
+    } catch {
+      setError("Clipboard is unavailable in this environment.");
+    }
   };
 
   const selectCommitBySha = (sha: string) => {
@@ -1455,6 +1555,8 @@ export default function App() {
             setStashMessage={setStashMessage}
             addRemote={addRepositoryRemote}
             stashCurrent={stashCurrent}
+            generateBranchName={() => void generateBranchName()}
+            aiGeneratingBranch={aiGeneratingBranch}
             deleteBranch={(name) => {
               const repo = requireRepo();
               if (repo && window.confirm(`Delete branch '${name}'?`)) {
@@ -1728,8 +1830,7 @@ export default function App() {
                       variant="secondary"
                       disabled={
                         loading ||
-                        !selectedCommitIsHead ||
-                        stagedChanges.length > 0 ||
+                        (selectedCommitIsHead ? stagedChanges.length > 0 : (snapshot?.changes.length ?? 0) > 0) ||
                         !selectedCommitMessage.trim() ||
                         selectedCommitMessage.trim() === selectedCommit.message
                       }
@@ -1737,8 +1838,48 @@ export default function App() {
                     >
                       Update Message
                     </Button>
-                    {!selectedCommitIsHead && <small>Only HEAD message editing is enabled until guarded reword/rebase is added.</small>}
+                    {!selectedCommitIsHead && (snapshot?.changes.length ?? 0) === 0 && (
+                      <small>Older commit edits rewrite linear local history after creating a safety snapshot.</small>
+                    )}
+                    {!selectedCommitIsHead && (snapshot?.changes.length ?? 0) > 0 && <small>Clean the working tree before rewording older commits.</small>}
                     {selectedCommitIsHead && stagedChanges.length > 0 && <small>Unstage files before amending the HEAD message.</small>}
+                    <div className="commit-edit-actions">
+                      <Button variant="secondary" disabled={!snapshot || loading} onClick={undoLastCommitAction}>
+                        Undo Last Commit
+                      </Button>
+                      <Button variant="secondary" disabled={!snapshot || loading || (snapshot?.commits.length ?? 0) < 2} onClick={squashLastCommitsAction}>
+                        Squash Last 2
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                <div className="ai-assist-row">
+                  <Button
+                    variant="secondary"
+                    disabled={!snapshot || loading || aiGeneratingBranch}
+                    onClick={() => void generateBranchName()}
+                  >
+                    <Sparkles size={13} />
+                    {aiGeneratingBranch ? "Naming" : "Branch Name"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={!snapshot || loading || aiGeneratingPr}
+                    onClick={() => void generatePrDescription()}
+                  >
+                    <FileText size={13} />
+                    {aiGeneratingPr ? "Drafting" : "PR Text"}
+                  </Button>
+                </div>
+                {aiPrDraft && (
+                  <div className="ai-pr-draft">
+                    <div>
+                      <strong>{aiPrDraft.title}</strong>
+                      <IconButton label="Copy PR draft" onClick={() => void copyPrDraft()}>
+                        <ClipboardList size={13} />
+                      </IconButton>
+                    </div>
+                    <pre>{aiPrDraft.description}</pre>
                   </div>
                 )}
                 <textarea
@@ -1775,11 +1916,12 @@ export default function App() {
             />
 
             <Panel title="Activity" className="operations-panel" actions={<Activity size={15} />}>
-              <div className="operation-log">
-                {operationLog.map((entry, index) => (
-                  <span key={`${entry}-${index}`}>{entry}</span>
-                ))}
-              </div>
+              <ActivityPanel
+                snapshots={snapshot?.undoSnapshots ?? []}
+                operationLog={operationLog}
+                loading={loading}
+                onRestore={restoreUndoSnapshotAction}
+              />
             </Panel>
           </section>
         </div>
@@ -1804,6 +1946,10 @@ export default function App() {
             ["Refresh", refresh],
             ["Stage all changes", () => batchFileAction("Stage all", unstagedChanges, stagePaths)],
             ["Unstage all changes", () => batchFileAction("Unstage all", stagedChanges, unstagePaths)],
+            ["Generate branch name", () => void generateBranchName()],
+            ["Generate PR text", () => void generatePrDescription()],
+            ["Undo last commit", undoLastCommitAction],
+            ["Squash last two commits", squashLastCommitsAction],
             ["Fetch", () => snapshot && runSnapshotOperation("Fetch", () => fetchRepo(snapshot.repository.path))],
             ["Pull", () => snapshot && runSnapshotOperation("Pull", () => pullRepo(snapshot.repository.path))],
             ["Push", pushCurrentBranch],
@@ -2031,6 +2177,8 @@ function Sidebar({
   setStashMessage,
   addRemote,
   stashCurrent,
+  generateBranchName,
+  aiGeneratingBranch,
   deleteBranch,
   applyStash,
   dropStash,
@@ -2048,6 +2196,8 @@ function Sidebar({
   setStashMessage: (value: string) => void;
   addRemote: () => void;
   stashCurrent: () => void;
+  generateBranchName: () => void;
+  aiGeneratingBranch: boolean;
   deleteBranch: (name: string) => void;
   applyStash: (stash: string) => void;
   dropStash: (stash: string) => void;
@@ -2058,7 +2208,18 @@ function Sidebar({
 
   return (
     <aside className="sidebar">
-      <Panel title="Branches" className="sidebar-branches-panel" actions={<GitBranch size={15} />}>
+      <Panel
+        title="Branches"
+        className="sidebar-branches-panel"
+        actions={
+          <span className="panel-action-group">
+            <IconButton label="Generate branch name" onClick={generateBranchName} disabled={!snapshot || aiGeneratingBranch}>
+              <Sparkles size={13} />
+            </IconButton>
+            <GitBranch size={15} />
+          </span>
+        }
+      >
         <div className="branch-filter">
           <Search size={13} aria-hidden="true" />
           <input
@@ -2750,6 +2911,65 @@ function ChangeColumn({
           </EmptyState>
         )}
       </div>
+    </div>
+  );
+}
+
+function ActivityPanel({
+  snapshots,
+  operationLog,
+  loading,
+  onRestore
+}: {
+  snapshots: UndoSnapshot[];
+  operationLog: string[];
+  loading: boolean;
+  onRestore: (snapshotId: string, label: string) => void;
+}) {
+  return (
+    <div className="activity-panel-body">
+      <section className="undo-timeline" aria-label="Safety snapshots">
+        <div className="activity-subheader">
+          <span>Undo Timeline</span>
+          <small>{snapshots.length}</small>
+        </div>
+        {snapshots.length > 0 ? (
+          snapshots.slice(0, 6).map((snapshot) => (
+            <button
+              key={snapshot.id}
+              type="button"
+              className="undo-row"
+              disabled={loading}
+              title={`${snapshot.label} · ${snapshot.id}`}
+              onClick={() => onRestore(snapshot.id, snapshot.label)}
+            >
+              <History size={13} />
+              <span>
+                <strong>{snapshot.label}</strong>
+                <small>
+                  {snapshot.branch ?? "detached"} · {formatUndoSnapshotTime(snapshot.createdAt)}
+                </small>
+              </span>
+            </button>
+          ))
+        ) : (
+          <EmptyState>
+            <History size={24} />
+            <span>No safety snapshots yet</span>
+          </EmptyState>
+        )}
+      </section>
+      <section className="operation-log-section" aria-label="Operation log">
+        <div className="activity-subheader">
+          <span>Log</span>
+          <small>{operationLog.length}</small>
+        </div>
+        <div className="operation-log">
+          {operationLog.map((entry, index) => (
+            <span key={`${entry}-${index}`}>{entry}</span>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }
@@ -4005,6 +4225,16 @@ function formatDateTime(value: string) {
     month: "2-digit",
     day: "2-digit",
     year: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function formatUndoSnapshotTime(value: string) {
+  const numeric = Number(value);
+  const date = Number.isFinite(numeric) ? new Date(numeric) : new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit"
   }).format(date);

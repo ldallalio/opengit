@@ -22,6 +22,15 @@ export type AiCommitSuggestion = {
   description: string;
 };
 
+export type AiBranchNameSuggestion = {
+  name: string;
+};
+
+export type AiPrDescriptionSuggestion = {
+  title: string;
+  description: string;
+};
+
 export type ConflictVersions = {
   path: string;
   base: string;
@@ -108,6 +117,12 @@ export const commit = (repoPath: string, message: string, amend: boolean) =>
 export const updateCommitMessage = (repoPath: string, commitSha: string, message: string) =>
   call<RepoSnapshot>("git_commit_message_update", { repoPath, commitSha, message }, demoSnapshot);
 
+export const undoLastCommit = (repoPath: string) =>
+  call<RepoSnapshot>("git_commit_undo_last", { repoPath }, demoSnapshot);
+
+export const squashLastCommits = (repoPath: string, message: string) =>
+  call<RepoSnapshot>("git_commit_squash_last", { repoPath, message }, demoSnapshot);
+
 export const getOpenAiStatus = () => call<OpenAiStatus>("ai_openai_status", {}, { configured: false });
 
 export const saveOpenAiApiKey = (apiKey: string) => call<OpenAiStatus>("ai_openai_save_api_key", { apiKey }, { configured: false });
@@ -130,6 +145,23 @@ export const generateAiCommitMessage = (repoPath: string, model?: string) =>
     {
       summary: "feat: summarize staged OpenGit changes",
       description: "Generated preview based on staged files. Desktop mode sends the staged diff to OpenAI."
+    }
+  );
+
+export const generateAiBranchName = (repoPath: string, model?: string) =>
+  call<AiBranchNameSuggestion>(
+    "ai_branch_name_generate",
+    { repoPath, model },
+    { name: "feature/generated-branch-name" }
+  );
+
+export const generateAiPrDescription = (repoPath: string, model?: string) =>
+  call<AiPrDescriptionSuggestion>(
+    "ai_pr_description_generate",
+    { repoPath, model },
+    {
+      title: "Improve OpenGit workflow",
+      description: "## Summary\n- Generated preview for browser mode\n\n## Testing\n- Not run in browser preview"
     }
   );
 
@@ -207,3 +239,6 @@ export const continueGitOperation = (repoPath: string) =>
 
 export const abortGitOperation = (repoPath: string) =>
   call<RepoSnapshot>("git_operation_abort", { repoPath }, demoSnapshot);
+
+export const restoreUndoSnapshot = (repoPath: string, snapshotId: string) =>
+  call<RepoSnapshot>("git_undo_restore", { repoPath, snapshotId }, demoSnapshot);

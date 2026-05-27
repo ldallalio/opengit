@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
+    fs,
     path::{Component, Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
 use thiserror::Error;
@@ -205,6 +207,19 @@ struct CommitFile {
     status: FileStatus,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct UndoSnapshot {
+    id: String,
+    label: String,
+    branch: Option<String>,
+    head_sha: Option<String>,
+    ref_name: Option<String>,
+    created_at: String,
+    has_staged_patch: bool,
+    has_working_patch: bool,
+}
+
 #[derive(Debug, Serialize, Clone, Copy)]
 #[serde(rename_all = "kebab-case")]
 enum FileStatus {
@@ -252,6 +267,7 @@ struct RepoSnapshot {
     stashes: Vec<Stash>,
     commits: Vec<Commit>,
     conflicts: Vec<Conflict>,
+    undo_snapshots: Vec<UndoSnapshot>,
 }
 
 #[derive(Debug, Default)]
@@ -298,6 +314,19 @@ struct AiCommitSuggestion {
     description: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiBranchNameSuggestion {
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiPrDescriptionSuggestion {
+    title: String,
+    description: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenAiResponseBody {
     status: Option<String>,
@@ -314,6 +343,17 @@ struct OpenAiIncompleteDetails {
 #[derive(Debug, Deserialize)]
 struct AiCommitSuggestionWire {
     summary: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiBranchNameSuggestionWire {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiPrDescriptionSuggestionWire {
+    title: String,
     description: Option<String>,
 }
 
@@ -352,7 +392,7 @@ async fn git_stage(repo_path: String, paths: Vec<String>) -> CommandResult<RepoS
     let safe_paths = validate_file_paths(&paths)?;
     let mut args = vec!["add".into(), "--".into()];
     args.extend(safe_paths);
-    run_git(Some(&repo), args).await?;
+    run_git_with_safety_snapshot(&repo, "before stage", args).await?;
     build_snapshot(&repo, None).await
 }
 
@@ -362,7 +402,7 @@ async fn git_unstage(repo_path: String, paths: Vec<String>) -> CommandResult<Rep
     let safe_paths = validate_file_paths(&paths)?;
     let mut args = vec!["restore".into(), "--staged".into(), "--".into()];
     args.extend(safe_paths);
-    run_git(Some(&repo), args).await?;
+    run_git_with_safety_snapshot(&repo, "before unstage", args).await?;
     build_snapshot(&repo, None).await
 }
 
@@ -372,7 +412,7 @@ async fn git_discard(repo_path: String, paths: Vec<String>) -> CommandResult<Rep
     let safe_paths = validate_file_paths(&paths)?;
     let mut args = vec!["restore".into(), "--".into()];
     args.extend(safe_paths);
-    run_git(Some(&repo), args).await?;
+    run_git_with_safety_snapshot(&repo, "before discard", args).await?;
     build_snapshot(&repo, None).await
 }
 
@@ -392,7 +432,7 @@ async fn git_commit(
         args.push("--amend".into());
     }
     args.extend(["-m".into(), message]);
-    run_git(Some(&repo), args).await?;
+    run_git_with_safety_snapshot(&repo, "before commit", args).await?;
     build_snapshot(&repo, None).await
 }
 
@@ -408,37 +448,364 @@ async fn git_commit_message_update(
         return invalid("INVALID_COMMIT_MESSAGE", "Commit message is required.");
     }
 
-    let head = run_git(Some(&repo), vec!["rev-parse".into(), "HEAD".into()]).await?;
-    if head.trim() != commit_sha.trim() {
-        return invalid(
-            "UNSUPPORTED_REWRITE",
-            "Only the HEAD commit message can be updated safely right now.",
-        );
-    }
+    reword_commit(&repo, &commit_sha, message.trim()).await?;
+    build_snapshot(&repo, None).await
+}
 
-    let staged = run_git(
-        Some(&repo),
-        vec![
-            "diff".into(),
-            "--cached".into(),
-            "--name-only".into(),
-            "-z".into(),
-        ],
-    )
-    .await?;
-    if !staged.is_empty() {
-        return invalid(
-            "STAGED_CHANGES_BLOCK_AMEND",
-            "Unstage files before updating the HEAD commit message.",
-        );
-    }
-
+#[tauri::command]
+async fn git_commit_undo_last(repo_path: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    ensure_no_active_operation(&repo).await?;
+    ensure_clean_worktree(&repo, "Undo last commit").await?;
     run_git(
         Some(&repo),
-        vec!["commit".into(), "--amend".into(), "-m".into(), message],
+        vec!["rev-parse".into(), "--verify".into(), "HEAD~1".into()],
+    )
+    .await?;
+    run_git_with_safety_snapshot(
+        &repo,
+        "before undo last commit",
+        vec!["reset".into(), "--mixed".into(), "HEAD~1".into()],
     )
     .await?;
     build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_commit_squash_last(repo_path: String, message: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    if message.trim().is_empty() {
+        return invalid("INVALID_COMMIT_MESSAGE", "Commit message is required.");
+    }
+    ensure_no_active_operation(&repo).await?;
+    ensure_clean_worktree(&repo, "Squash last commits").await?;
+    let branch = ensure_current_local_branch(&repo).await?;
+    let old_head = resolve_commit_sha(&repo, "HEAD").await?;
+    let previous_commit =
+        resolve_commit_sha(&repo, "HEAD~1")
+            .await
+            .map_err(|_| AppError::InvalidInput {
+                code: "UNSUPPORTED_REWRITE",
+                message: "At least two linear commits are required before squashing.".to_string(),
+            })?;
+    if commit_parent_count(&repo, "HEAD").await? > 1
+        || commit_parent_count(&repo, "HEAD~1").await? > 1
+    {
+        return invalid(
+            "UNSUPPORTED_REWRITE",
+            "Merge commits cannot be squashed in this guarded flow.",
+        );
+    }
+
+    create_safety_snapshot(&repo, "before squash last commits").await?;
+    let tree = commit_tree_id(&repo, "HEAD").await?;
+    let author = commit_author_meta(&repo, "HEAD").await?;
+    let parent = first_parent(&repo, &previous_commit).await?;
+    let new_sha =
+        create_commit_with_tree(&repo, &tree, parent.as_deref(), message.trim(), &author).await?;
+    update_current_branch_to(&repo, &branch, &new_sha, &old_head).await?;
+    build_snapshot(&repo, None).await
+}
+
+async fn reword_commit(repo: &Path, commit_sha: &str, message: &str) -> CommandResult<()> {
+    ensure_no_active_operation(repo).await?;
+    let target = resolve_commit_sha(repo, commit_sha).await?;
+    let head = resolve_commit_sha(repo, "HEAD").await?;
+
+    if target == head {
+        let staged = run_git(
+            Some(repo),
+            vec![
+                "diff".into(),
+                "--cached".into(),
+                "--name-only".into(),
+                "-z".into(),
+            ],
+        )
+        .await?;
+        if !staged.is_empty() {
+            return invalid(
+                "STAGED_CHANGES_BLOCK_AMEND",
+                "Unstage files before updating the HEAD commit message.",
+            );
+        }
+
+        run_git_with_safety_snapshot(
+            repo,
+            "before commit message update",
+            vec![
+                "commit".into(),
+                "--amend".into(),
+                "-m".into(),
+                message.to_string(),
+            ],
+        )
+        .await?;
+        return Ok(());
+    }
+
+    if !is_ancestor(repo, &target, &head).await {
+        return invalid(
+            "UNSUPPORTED_REWRITE",
+            "Selected commit is not an ancestor of HEAD in the current branch.",
+        );
+    }
+
+    ensure_clean_worktree(repo, "Update older commit message").await?;
+    let branch = ensure_current_local_branch(repo).await?;
+    let rewrite_chain = linear_rewrite_chain(repo, &target, &head).await?;
+    create_safety_snapshot(repo, "before older commit message update").await?;
+
+    let mut previous_new_parent = first_parent(repo, &target).await?;
+    let mut final_new_sha = String::new();
+    for sha in rewrite_chain {
+        let tree = commit_tree_id(repo, &sha).await?;
+        let author = commit_author_meta(repo, &sha).await?;
+        let commit_message = if sha == target {
+            message.to_string()
+        } else {
+            read_commit_message(repo, &sha).await?
+        };
+        let new_sha = create_commit_with_tree(
+            repo,
+            &tree,
+            previous_new_parent.as_deref(),
+            &commit_message,
+            &author,
+        )
+        .await?;
+        previous_new_parent = Some(new_sha.clone());
+        final_new_sha = new_sha;
+    }
+
+    update_current_branch_to(repo, &branch, &final_new_sha, &head).await
+}
+
+#[derive(Debug)]
+struct CommitAuthorMeta {
+    name: String,
+    email: String,
+    date: String,
+}
+
+async fn ensure_no_active_operation(repo: &Path) -> CommandResult<()> {
+    if matches!(detect_git_operation(repo).await, GitOperationState::None) {
+        return Ok(());
+    }
+    invalid(
+        "ACTIVE_GIT_OPERATION",
+        "Finish or abort the active merge, rebase, or cherry-pick before editing commits.",
+    )
+}
+
+async fn ensure_clean_worktree(repo: &Path, action: &str) -> CommandResult<()> {
+    let status = run_git(
+        Some(repo),
+        vec!["status".into(), "--porcelain=v2".into(), "-z".into()],
+    )
+    .await?;
+    if status.is_empty() {
+        return Ok(());
+    }
+    invalid(
+        "DIRTY_WORKTREE_BLOCK_REWRITE",
+        &format!("{action} requires a clean working tree. Commit, stash, or discard local changes first."),
+    )
+}
+
+async fn ensure_current_local_branch(repo: &Path) -> CommandResult<String> {
+    current_branch_name(repo)
+        .await
+        .ok_or_else(|| AppError::InvalidInput {
+            code: "DETACHED_HEAD_BLOCK_REWRITE",
+            message: "Checkout a local branch before rewriting commit history.".to_string(),
+        })
+}
+
+async fn resolve_commit_sha(repo: &Path, value: &str) -> CommandResult<String> {
+    let output = run_git(
+        Some(repo),
+        vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            format!("{value}^{{commit}}"),
+        ],
+    )
+    .await?;
+    Ok(output.trim().to_string())
+}
+
+async fn commit_parent_count(repo: &Path, value: &str) -> CommandResult<usize> {
+    let output = run_git(
+        Some(repo),
+        vec![
+            "rev-list".into(),
+            "--parents".into(),
+            "-n".into(),
+            "1".into(),
+            value.to_string(),
+        ],
+    )
+    .await?;
+    Ok(output.split_whitespace().skip(1).count())
+}
+
+async fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
+    run_git(
+        Some(repo),
+        vec![
+            "merge-base".into(),
+            "--is-ancestor".into(),
+            ancestor.to_string(),
+            descendant.to_string(),
+        ],
+    )
+    .await
+    .is_ok()
+}
+
+async fn linear_rewrite_chain(repo: &Path, target: &str, head: &str) -> CommandResult<Vec<String>> {
+    let mut chain = vec![target.to_string()];
+    let descendants = run_git(
+        Some(repo),
+        vec![
+            "rev-list".into(),
+            "--reverse".into(),
+            "--first-parent".into(),
+            format!("{target}..{head}"),
+        ],
+    )
+    .await?;
+    chain.extend(
+        descendants
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToString::to_string),
+    );
+
+    for sha in &chain {
+        if commit_parent_count(repo, sha).await? > 1 {
+            return invalid(
+                "UNSUPPORTED_REWRITE",
+                "Merge commits cannot be reworded in this guarded rewrite flow.",
+            );
+        }
+    }
+
+    Ok(chain)
+}
+
+async fn first_parent(repo: &Path, sha: &str) -> CommandResult<Option<String>> {
+    let output = run_git(
+        Some(repo),
+        vec![
+            "rev-list".into(),
+            "--parents".into(),
+            "-n".into(),
+            "1".into(),
+            sha.to_string(),
+        ],
+    )
+    .await?;
+    Ok(output.split_whitespace().nth(1).map(ToString::to_string))
+}
+
+async fn commit_tree_id(repo: &Path, sha: &str) -> CommandResult<String> {
+    let output = run_git(
+        Some(repo),
+        vec![
+            "show".into(),
+            "-s".into(),
+            "--format=%T".into(),
+            sha.to_string(),
+        ],
+    )
+    .await?;
+    Ok(output.trim().to_string())
+}
+
+async fn read_commit_message(repo: &Path, sha: &str) -> CommandResult<String> {
+    run_git(
+        Some(repo),
+        vec![
+            "log".into(),
+            "-1".into(),
+            "--format=%B".into(),
+            sha.to_string(),
+        ],
+    )
+    .await
+    .map(|message| message.trim_end().to_string())
+}
+
+async fn commit_author_meta(repo: &Path, sha: &str) -> CommandResult<CommitAuthorMeta> {
+    let output = run_git(
+        Some(repo),
+        vec![
+            "show".into(),
+            "-s".into(),
+            "--format=%an%x1f%ae%x1f%aI".into(),
+            sha.to_string(),
+        ],
+    )
+    .await?;
+    let mut parts = output.trim_end().split('\u{1f}');
+    Ok(CommitAuthorMeta {
+        name: parts.next().unwrap_or_default().to_string(),
+        email: parts.next().unwrap_or_default().to_string(),
+        date: parts.next().unwrap_or_default().to_string(),
+    })
+}
+
+async fn create_commit_with_tree(
+    repo: &Path,
+    tree: &str,
+    parent: Option<&str>,
+    message: &str,
+    author: &CommitAuthorMeta,
+) -> CommandResult<String> {
+    let mut args = vec!["commit-tree".into(), tree.to_string()];
+    if let Some(parent) = parent {
+        args.extend(["-p".into(), parent.to_string()]);
+    }
+    args.extend(["-m".into(), message.to_string()]);
+    let output = run_git_with_env(
+        Some(repo),
+        args,
+        vec![
+            ("GIT_AUTHOR_NAME", author.name.clone()),
+            ("GIT_AUTHOR_EMAIL", author.email.clone()),
+            ("GIT_AUTHOR_DATE", author.date.clone()),
+        ],
+    )
+    .await?;
+    Ok(output.trim().to_string())
+}
+
+async fn update_current_branch_to(
+    repo: &Path,
+    branch: &str,
+    new_sha: &str,
+    old_head: &str,
+) -> CommandResult<()> {
+    let branch_ref = format!("refs/heads/{branch}");
+    run_git(
+        Some(repo),
+        vec![
+            "update-ref".into(),
+            branch_ref.clone(),
+            new_sha.to_string(),
+            old_head.to_string(),
+        ],
+    )
+    .await?;
+    run_git(
+        Some(repo),
+        vec!["reset".into(), "--hard".into(), branch_ref],
+    )
+    .await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -624,6 +991,57 @@ async fn ai_commit_message_generate(
 }
 
 #[tauri::command]
+async fn ai_branch_name_generate(
+    repo_path: String,
+    model: Option<String>,
+) -> CommandResult<AiBranchNameSuggestion> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let api_key = read_openai_api_key()?.ok_or_else(|| AppError::InvalidInput {
+        code: "OPENAI_KEY_MISSING",
+        message:
+            "Add an OpenAI API key in Preferences > Integrations before generating branch names."
+                .to_string(),
+    })?;
+    let model = validate_openai_model(model)?;
+    let context = build_change_context(&repo, "branch name").await?;
+    let body_text = request_openai_response_body(
+        &api_key,
+        &model,
+        "You create concise Git branch names from repository changes. Return only JSON with key name. The name must be lowercase kebab-case, may include one slash prefix like feature/, fix/, chore/, docs/, refactor/, or wip/, must not contain spaces, and must be no more than 48 characters. Do not invent work not shown in the Git context.",
+        context,
+        400,
+    )
+    .await?;
+
+    parse_openai_branch_response(&body_text)
+}
+
+#[tauri::command]
+async fn ai_pr_description_generate(
+    repo_path: String,
+    model: Option<String>,
+) -> CommandResult<AiPrDescriptionSuggestion> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let api_key = read_openai_api_key()?.ok_or_else(|| AppError::InvalidInput {
+        code: "OPENAI_KEY_MISSING",
+        message: "Add an OpenAI API key in Preferences > Integrations before generating PR text."
+            .to_string(),
+    })?;
+    let model = validate_openai_model(model)?;
+    let context = build_pr_context(&repo).await?;
+    let body_text = request_openai_response_body(
+        &api_key,
+        &model,
+        "You draft practical pull request copy from Git history and diffs. Return only JSON with keys title and description. title must be concise. description must use markdown with a short Summary section and a Testing section. Do not invent product behavior, tickets, reviewers, or test results not shown in the context.",
+        context,
+        1400,
+    )
+    .await?;
+
+    parse_openai_pr_response(&body_text)
+}
+
+#[tauri::command]
 async fn git_branch_create(request: BranchCreateRequest) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&request.repo_path).await?;
     validate_ref_arg(&request.name, "branch name")?;
@@ -632,9 +1050,14 @@ async fn git_branch_create(request: BranchCreateRequest) -> CommandResult<RepoSn
         validate_ref_arg(&start_point, "branch start point")?;
         args.push(start_point);
     }
-    run_git(Some(&repo), args).await?;
+    run_git_with_safety_snapshot(&repo, "before branch create", args).await?;
     if request.checkout {
-        run_git(Some(&repo), vec!["checkout".into(), request.name]).await?;
+        run_git_with_safety_snapshot(
+            &repo,
+            "before checkout",
+            vec!["checkout".into(), request.name],
+        )
+        .await?;
     }
     build_snapshot(&repo, None).await
 }
@@ -643,7 +1066,7 @@ async fn git_branch_create(request: BranchCreateRequest) -> CommandResult<RepoSn
 async fn git_branch_checkout(repo_path: String, name: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&name, "branch name")?;
-    run_git(Some(&repo), vec!["checkout".into(), name]).await?;
+    run_git_with_safety_snapshot(&repo, "before checkout", vec!["checkout".into(), name]).await?;
     build_snapshot(&repo, None).await
 }
 
@@ -656,7 +1079,12 @@ async fn git_branch_delete(
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&name, "branch name")?;
     let delete_arg = if force { "-D" } else { "-d" };
-    run_git(Some(&repo), vec!["branch".into(), delete_arg.into(), name]).await?;
+    run_git_with_safety_snapshot(
+        &repo,
+        "before branch delete",
+        vec!["branch".into(), delete_arg.into(), name],
+    )
+    .await?;
     build_snapshot(&repo, None).await
 }
 
@@ -669,8 +1097,9 @@ async fn git_branch_rename(
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&old_name, "branch name")?;
     validate_ref_arg(&new_name, "new branch name")?;
-    run_git(
-        Some(&repo),
+    run_git_with_safety_snapshot(
+        &repo,
+        "before branch rename",
         vec!["branch".into(), "-m".into(), old_name, new_name],
     )
     .await?;
@@ -694,6 +1123,7 @@ async fn git_pull(repo_path: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     run_git_snapshot_operation(
         &repo,
+        "before pull",
         vec!["pull".into(), "--ff".into(), "--no-edit".into()],
     )
     .await
@@ -704,6 +1134,7 @@ async fn git_pull_fast_forward(repo_path: String) -> CommandResult<RepoSnapshot>
     let repo = resolve_repo_root(&repo_path).await?;
     run_git_snapshot_operation(
         &repo,
+        "before fast-forward pull",
         vec!["pull".into(), "--ff".into(), "--no-edit".into()],
     )
     .await
@@ -712,40 +1143,55 @@ async fn git_pull_fast_forward(repo_path: String) -> CommandResult<RepoSnapshot>
 #[tauri::command]
 async fn git_pull_rebase(repo_path: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
-    run_git_snapshot_operation(&repo, vec!["pull".into(), "--rebase".into()]).await
+    run_git_snapshot_operation(
+        &repo,
+        "before pull rebase",
+        vec!["pull".into(), "--rebase".into()],
+    )
+    .await
 }
 
 #[tauri::command]
 async fn git_merge(repo_path: String, branch: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&branch, "branch name")?;
-    run_git_snapshot_operation(&repo, vec!["merge".into(), "--no-edit".into(), branch]).await
+    run_git_snapshot_operation(
+        &repo,
+        "before merge",
+        vec!["merge".into(), "--no-edit".into(), branch],
+    )
+    .await
 }
 
 #[tauri::command]
 async fn git_rebase(repo_path: String, upstream: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&upstream, "upstream branch")?;
-    run_git_snapshot_operation(&repo, vec!["rebase".into(), upstream]).await
+    run_git_snapshot_operation(&repo, "before rebase", vec!["rebase".into(), upstream]).await
 }
 
 #[tauri::command]
 async fn git_cherry_pick(repo_path: String, commit_sha: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&commit_sha, "commit")?;
-    run_git_snapshot_operation(&repo, vec!["cherry-pick".into(), commit_sha]).await
+    run_git_snapshot_operation(
+        &repo,
+        "before cherry-pick",
+        vec!["cherry-pick".into(), commit_sha],
+    )
+    .await
 }
 
 #[tauri::command]
 async fn git_revert(repo_path: String, commit_sha: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&commit_sha, "commit")?;
-    run_git(
-        Some(&repo),
+    run_git_snapshot_operation(
+        &repo,
+        "before revert",
         vec!["revert".into(), "--no-edit".into(), commit_sha],
     )
-    .await?;
-    build_snapshot(&repo, None).await
+    .await
 }
 
 #[tauri::command]
@@ -775,8 +1221,9 @@ async fn git_conflict_resolve(
     let path = safe_paths.remove(0);
     match strategy.as_str() {
         "ours" => {
-            run_git(
-                Some(&repo),
+            run_git_with_safety_snapshot(
+                &repo,
+                "before conflict resolve",
                 vec![
                     "checkout".into(),
                     "--ours".into(),
@@ -787,8 +1234,9 @@ async fn git_conflict_resolve(
             .await?;
         }
         "theirs" => {
-            run_git(
-                Some(&repo),
+            run_git_with_safety_snapshot(
+                &repo,
+                "before conflict resolve",
                 vec![
                     "checkout".into(),
                     "--theirs".into(),
@@ -799,6 +1247,7 @@ async fn git_conflict_resolve(
             .await?;
         }
         "both" => {
+            create_safety_snapshot(&repo, "before conflict resolve").await?;
             let ours = git_show_stage(&repo, 2, &path).await.unwrap_or_default();
             let theirs = git_show_stage(&repo, 3, &path).await.unwrap_or_default();
             let combined = combine_conflict_sides(&ours, &theirs);
@@ -824,7 +1273,12 @@ async fn git_conflict_mark_resolved(
     let repo = resolve_repo_root(&repo_path).await?;
     let mut safe_paths = validate_file_paths(&[path])?;
     let path = safe_paths.remove(0);
-    run_git(Some(&repo), vec!["add".into(), "--".into(), path]).await?;
+    run_git_with_safety_snapshot(
+        &repo,
+        "before mark resolved",
+        vec!["add".into(), "--".into(), path],
+    )
+    .await?;
     build_snapshot(&repo, None).await
 }
 
@@ -833,13 +1287,28 @@ async fn git_operation_continue(repo_path: String) -> CommandResult<RepoSnapshot
     let repo = resolve_repo_root(&repo_path).await?;
     match detect_git_operation(&repo).await {
         GitOperationState::Rebasing => {
-            run_git_snapshot_operation(&repo, vec!["rebase".into(), "--continue".into()]).await
+            run_git_snapshot_operation(
+                &repo,
+                "before rebase continue",
+                vec!["rebase".into(), "--continue".into()],
+            )
+            .await
         }
         GitOperationState::CherryPicking => {
-            run_git_snapshot_operation(&repo, vec!["cherry-pick".into(), "--continue".into()]).await
+            run_git_snapshot_operation(
+                &repo,
+                "before cherry-pick continue",
+                vec!["cherry-pick".into(), "--continue".into()],
+            )
+            .await
         }
         GitOperationState::Merging => {
-            run_git_snapshot_operation(&repo, vec!["commit".into(), "--no-edit".into()]).await
+            run_git_snapshot_operation(
+                &repo,
+                "before merge continue",
+                vec!["commit".into(), "--no-edit".into()],
+            )
+            .await
         }
         GitOperationState::None => invalid(
             "NO_GIT_OPERATION",
@@ -853,13 +1322,28 @@ async fn git_operation_abort(repo_path: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     match detect_git_operation(&repo).await {
         GitOperationState::Rebasing => {
-            run_git(Some(&repo), vec!["rebase".into(), "--abort".into()]).await?;
+            run_git_with_safety_snapshot(
+                &repo,
+                "before rebase abort",
+                vec!["rebase".into(), "--abort".into()],
+            )
+            .await?;
         }
         GitOperationState::CherryPicking => {
-            run_git(Some(&repo), vec!["cherry-pick".into(), "--abort".into()]).await?;
+            run_git_with_safety_snapshot(
+                &repo,
+                "before cherry-pick abort",
+                vec!["cherry-pick".into(), "--abort".into()],
+            )
+            .await?;
         }
         GitOperationState::Merging => {
-            run_git(Some(&repo), vec!["merge".into(), "--abort".into()]).await?;
+            run_git_with_safety_snapshot(
+                &repo,
+                "before merge abort",
+                vec!["merge".into(), "--abort".into()],
+            )
+            .await?;
         }
         GitOperationState::None => {
             return invalid(
@@ -890,7 +1374,7 @@ async fn git_tag_create(
         args.extend([name, target]);
     }
 
-    run_git(Some(&repo), args).await?;
+    run_git_with_safety_snapshot(&repo, "before tag create", args).await?;
     build_snapshot(&repo, None).await
 }
 
@@ -919,6 +1403,7 @@ async fn git_push(
         validate_ref_arg(&branch_name, "branch name")?;
         args.push(branch_name);
     }
+    create_safety_snapshot(&repo, "before push").await?;
     if let Err(error) = run_git(Some(&repo), args).await {
         if !force_with_lease && is_push_non_fast_forward_error(&error) {
             return Err(push_non_fast_forward_error(error, &context));
@@ -937,7 +1422,12 @@ async fn git_remote_add(
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&name, "remote name")?;
     validate_remote_url(&url)?;
-    run_git(Some(&repo), vec!["remote".into(), "add".into(), name, url]).await?;
+    run_git_with_safety_snapshot(
+        &repo,
+        "before remote add",
+        vec!["remote".into(), "add".into(), name, url],
+    )
+    .await?;
     build_snapshot(&repo, None).await
 }
 
@@ -948,7 +1438,7 @@ async fn git_stash_push(repo_path: String, message: String) -> CommandResult<Rep
     if !message.trim().is_empty() {
         args.extend(["-m".into(), message]);
     }
-    run_git(Some(&repo), args).await?;
+    run_git_with_safety_snapshot(&repo, "before stash", args).await?;
     build_snapshot(&repo, None).await
 }
 
@@ -956,7 +1446,12 @@ async fn git_stash_push(repo_path: String, message: String) -> CommandResult<Rep
 async fn git_stash_apply(repo_path: String, stash: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_stash_ref(&stash)?;
-    run_git(Some(&repo), vec!["stash".into(), "apply".into(), stash]).await?;
+    run_git_with_safety_snapshot(
+        &repo,
+        "before stash apply",
+        vec!["stash".into(), "apply".into(), stash],
+    )
+    .await?;
     build_snapshot(&repo, None).await
 }
 
@@ -964,7 +1459,12 @@ async fn git_stash_apply(repo_path: String, stash: String) -> CommandResult<Repo
 async fn git_stash_drop(repo_path: String, stash: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_stash_ref(&stash)?;
-    run_git(Some(&repo), vec!["stash".into(), "drop".into(), stash]).await?;
+    run_git_with_safety_snapshot(
+        &repo,
+        "before stash drop",
+        vec!["stash".into(), "drop".into(), stash],
+    )
+    .await?;
     build_snapshot(&repo, None).await
 }
 
@@ -1074,6 +1574,7 @@ async fn build_snapshot(repo: &Path, history_limit: Option<u32>) -> CommandResul
             .await
             .unwrap_or_default(),
     );
+    let undo_snapshots = list_undo_snapshots(repo).await.unwrap_or_default();
 
     let worktree_state = detect_worktree_state(repo, &branch_status, &changes).await;
     let name = repo
@@ -1107,6 +1608,7 @@ async fn build_snapshot(repo: &Path, history_limit: Option<u32>) -> CommandResul
         stashes,
         commits,
         conflicts,
+        undo_snapshots,
     })
 }
 
@@ -1179,7 +1681,66 @@ async fn run_git(repo: Option<&Path>, args: Vec<String>) -> CommandResult<String
     }
 }
 
-async fn run_git_snapshot_operation(repo: &Path, args: Vec<String>) -> CommandResult<RepoSnapshot> {
+async fn run_git_with_env(
+    repo: Option<&Path>,
+    args: Vec<String>,
+    envs: Vec<(&str, String)>,
+) -> CommandResult<String> {
+    let extra_headers = git_http_extra_headers(repo, &args).await?;
+    let mut command = Command::new("git");
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    if !extra_headers.is_empty() {
+        command.env("GIT_CONFIG_COUNT", extra_headers.len().to_string());
+        for (index, header) in extra_headers.iter().enumerate() {
+            command.env(
+                format!("GIT_CONFIG_KEY_{index}"),
+                format!("http.{}.extraheader", header.scope),
+            );
+            command.env(format!("GIT_CONFIG_VALUE_{index}"), &header.header);
+        }
+    }
+    if let Some(repo_path) = repo {
+        command.arg("-C").arg(repo_path);
+    }
+    command.args(args);
+
+    let output = command.output().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        let detail = if stderr.trim().is_empty() {
+            stdout
+        } else {
+            stderr
+        };
+        Err(AppError::GitFailed {
+            message: git_error_summary(&detail),
+            detail,
+        })
+    }
+}
+
+async fn run_git_with_safety_snapshot(
+    repo: &Path,
+    label: &str,
+    args: Vec<String>,
+) -> CommandResult<String> {
+    create_safety_snapshot(repo, label).await?;
+    run_git(Some(repo), args).await
+}
+
+async fn run_git_snapshot_operation(
+    repo: &Path,
+    label: &str,
+    args: Vec<String>,
+) -> CommandResult<RepoSnapshot> {
+    create_safety_snapshot(repo, label).await?;
     match run_git(Some(repo), args).await {
         Ok(_) => build_snapshot(repo, None).await,
         Err(error) => {
@@ -1190,6 +1751,260 @@ async fn run_git_snapshot_operation(repo: &Path, args: Vec<String>) -> CommandRe
             }
         }
     }
+}
+
+#[tauri::command]
+async fn git_undo_restore(repo_path: String, snapshot_id: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let snapshot_id = validate_snapshot_id(&snapshot_id)?;
+    if !matches!(detect_git_operation(&repo).await, GitOperationState::None) {
+        return invalid(
+            "ACTIVE_GIT_OPERATION",
+            "Finish or abort the active merge, rebase, or cherry-pick before restoring a snapshot.",
+        );
+    }
+
+    let snapshot = read_undo_snapshot(&repo, &snapshot_id).await?;
+    create_safety_snapshot(&repo, "before undo restore").await?;
+    let target = snapshot
+        .ref_name
+        .as_ref()
+        .or(snapshot.head_sha.as_ref())
+        .ok_or_else(|| AppError::InvalidInput {
+            code: "INVALID_UNDO_SNAPSHOT",
+            message: "Undo snapshot does not contain a restorable commit.".to_string(),
+        })?
+        .clone();
+
+    run_git(Some(&repo), vec!["reset".into(), "--hard".into(), target]).await?;
+    let snapshot_dir = undo_snapshot_dir(&repo).await?;
+    let staged_patch = snapshot_dir.join(format!("{snapshot_id}.staged.patch"));
+    let working_patch = snapshot_dir.join(format!("{snapshot_id}.working.patch"));
+
+    if snapshot.has_staged_patch && staged_patch.exists() {
+        run_git(
+            Some(&repo),
+            vec![
+                "apply".into(),
+                "--index".into(),
+                "--whitespace=nowarn".into(),
+                staged_patch.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+    if snapshot.has_working_patch && working_patch.exists() {
+        run_git(
+            Some(&repo),
+            vec![
+                "apply".into(),
+                "--whitespace=nowarn".into(),
+                working_patch.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+
+    build_snapshot(&repo, None).await
+}
+
+async fn create_safety_snapshot(repo: &Path, label: &str) -> CommandResult<Option<UndoSnapshot>> {
+    let Some(git_dir) = git_dir_path(repo).await else {
+        return Ok(None);
+    };
+    let snapshot_dir = git_dir.join("opengit").join("snapshots");
+    fs::create_dir_all(&snapshot_dir)?;
+
+    let head_sha = run_git(
+        Some(repo),
+        vec!["rev-parse".into(), "--verify".into(), "HEAD".into()],
+    )
+    .await
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty());
+    let branch = current_branch_name(repo).await;
+    let id = safety_snapshot_id(label);
+    let created_at = now_millis().to_string();
+    let ref_name = head_sha
+        .as_ref()
+        .map(|_| format!("refs/opengit/snapshots/{id}"));
+
+    if let (Some(head_sha), Some(ref_name)) = (&head_sha, &ref_name) {
+        run_git(
+            Some(repo),
+            vec!["update-ref".into(), ref_name.clone(), head_sha.clone()],
+        )
+        .await?;
+    }
+
+    let staged_patch = run_git(
+        Some(repo),
+        vec!["diff".into(), "--cached".into(), "--binary".into()],
+    )
+    .await
+    .unwrap_or_default();
+    let working_patch = run_git(Some(repo), vec!["diff".into(), "--binary".into()])
+        .await
+        .unwrap_or_default();
+    let has_staged_patch = !staged_patch.trim().is_empty();
+    let has_working_patch = !working_patch.trim().is_empty();
+
+    if has_staged_patch {
+        fs::write(
+            snapshot_dir.join(format!("{id}.staged.patch")),
+            staged_patch,
+        )?;
+    }
+    if has_working_patch {
+        fs::write(
+            snapshot_dir.join(format!("{id}.working.patch")),
+            working_patch,
+        )?;
+    }
+
+    let snapshot = UndoSnapshot {
+        id: id.clone(),
+        label: truncate_display_text(label.trim(), 90),
+        branch,
+        head_sha,
+        ref_name,
+        created_at,
+        has_staged_patch,
+        has_working_patch,
+    };
+    let body =
+        serde_json::to_vec_pretty(&snapshot).map_err(|error| AppError::Io(error.to_string()))?;
+    fs::write(snapshot_dir.join(format!("{id}.json")), body)?;
+    prune_undo_snapshots(&snapshot_dir, 40);
+
+    Ok(Some(snapshot))
+}
+
+async fn list_undo_snapshots(repo: &Path) -> CommandResult<Vec<UndoSnapshot>> {
+    let snapshot_dir = undo_snapshot_dir(repo).await?;
+    if !snapshot_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut snapshots = Vec::new();
+    for entry in fs::read_dir(snapshot_dir)? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(snapshot) = serde_json::from_str::<UndoSnapshot>(&body) {
+            snapshots.push(snapshot);
+        }
+    }
+
+    snapshots.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    snapshots.truncate(20);
+    Ok(snapshots)
+}
+
+async fn read_undo_snapshot(repo: &Path, snapshot_id: &str) -> CommandResult<UndoSnapshot> {
+    let snapshot_dir = undo_snapshot_dir(repo).await?;
+    let path = snapshot_dir.join(format!("{snapshot_id}.json"));
+    let body = fs::read_to_string(path).map_err(|_| AppError::InvalidInput {
+        code: "INVALID_UNDO_SNAPSHOT",
+        message: "Undo snapshot could not be found.".to_string(),
+    })?;
+    serde_json::from_str(&body).map_err(|error| AppError::InvalidInput {
+        code: "INVALID_UNDO_SNAPSHOT",
+        message: format!("Undo snapshot is unreadable: {error}"),
+    })
+}
+
+async fn undo_snapshot_dir(repo: &Path) -> CommandResult<PathBuf> {
+    let Some(git_dir) = git_dir_path(repo).await else {
+        return invalid(
+            "INVALID_REPOSITORY",
+            "Repository Git directory could not be resolved.",
+        );
+    };
+    Ok(git_dir.join("opengit").join("snapshots"))
+}
+
+fn prune_undo_snapshots(snapshot_dir: &Path, keep: usize) {
+    let Ok(entries) = fs::read_dir(snapshot_dir) else {
+        return;
+    };
+    let mut snapshots: Vec<_> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .filter_map(|path| {
+            let body = fs::read_to_string(&path).ok()?;
+            let snapshot = serde_json::from_str::<UndoSnapshot>(&body).ok()?;
+            Some((snapshot.created_at, snapshot.id, path))
+        })
+        .collect();
+    snapshots.sort_by(|left, right| right.0.cmp(&left.0));
+
+    for (_, id, metadata_path) in snapshots.into_iter().skip(keep) {
+        let _ = fs::remove_file(metadata_path);
+        let _ = fs::remove_file(snapshot_dir.join(format!("{id}.staged.patch")));
+        let _ = fs::remove_file(snapshot_dir.join(format!("{id}.working.patch")));
+    }
+}
+
+async fn current_branch_name(repo: &Path) -> Option<String> {
+    run_git(
+        Some(repo),
+        vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+    )
+    .await
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty() && value != "HEAD")
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn safety_snapshot_id(label: &str) -> String {
+    let slug = label
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                Some(ch.to_ascii_lowercase())
+            } else if ch == '-' || ch == '_' || ch.is_ascii_whitespace() {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug = if slug.is_empty() { "operation" } else { &slug };
+    format!("{}-{slug}", now_millis())
+}
+
+fn validate_snapshot_id(value: &str) -> CommandResult<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 140 {
+        return invalid("INVALID_UNDO_SNAPSHOT", "Undo snapshot id is invalid.");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return invalid("INVALID_UNDO_SNAPSHOT", "Undo snapshot id is invalid.");
+    }
+    Ok(value.to_string())
 }
 
 async fn snapshot_for_interrupted_operation(repo: &Path) -> CommandResult<Option<RepoSnapshot>> {
@@ -2022,6 +2837,48 @@ fn openai_error_message(body_text: &str) -> String {
     }
 }
 
+async fn request_openai_response_body(
+    api_key: &str,
+    model: &str,
+    instructions: &str,
+    input: String,
+    max_output_tokens: u32,
+) -> CommandResult<String> {
+    let response = reqwest::Client::new()
+        .post("https://api.openai.com/v1/responses")
+        .bearer_auth(api_key)
+        .json(&json!({
+            "model": model,
+            "instructions": instructions,
+            "input": input,
+            "reasoning": {
+                "effort": "minimal"
+            },
+            "max_output_tokens": max_output_tokens
+        }))
+        .send()
+        .await
+        .map_err(|error| AppError::AiFailed {
+            message: "Could not reach OpenAI.".to_string(),
+            detail: error.to_string(),
+        })?;
+
+    let status = response.status();
+    let body_text = response.text().await.map_err(|error| AppError::AiFailed {
+        message: "Could not read OpenAI response.".to_string(),
+        detail: error.to_string(),
+    })?;
+
+    if !status.is_success() {
+        return Err(AppError::AiFailed {
+            message: format!("OpenAI returned HTTP {status}."),
+            detail: body_text,
+        });
+    }
+
+    Ok(body_text)
+}
+
 async fn build_staged_commit_context(repo: &Path) -> CommandResult<String> {
     let staged_names = run_git(
         Some(repo),
@@ -2089,6 +2946,203 @@ async fn build_staged_commit_context(repo: &Path) -> CommandResult<String> {
     ))
 }
 
+async fn build_change_context(repo: &Path, purpose: &str) -> CommandResult<String> {
+    let status = run_git(Some(repo), vec!["status".into(), "--short".into()]).await?;
+    let staged_diff = run_git(
+        Some(repo),
+        vec![
+            "diff".into(),
+            "--cached".into(),
+            "--no-ext-diff".into(),
+            "--find-renames".into(),
+            "--unified=60".into(),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    let working_diff = run_git(
+        Some(repo),
+        vec![
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--find-renames".into(),
+            "--unified=60".into(),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+
+    if status.trim().is_empty() && staged_diff.trim().is_empty() && working_diff.trim().is_empty() {
+        return invalid(
+            "NO_CHANGES",
+            &format!("Make or stage changes before generating a {purpose}."),
+        );
+    }
+
+    let branch = run_git(
+        Some(repo),
+        vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+    )
+    .await
+    .unwrap_or_else(|_| "unknown".to_string());
+    let staged_name_status = run_git(
+        Some(repo),
+        vec![
+            "diff".into(),
+            "--cached".into(),
+            "--name-status".into(),
+            "--find-renames".into(),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    let working_name_status = run_git(
+        Some(repo),
+        vec![
+            "diff".into(),
+            "--name-status".into(),
+            "--find-renames".into(),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    let staged_stat = run_git(
+        Some(repo),
+        vec!["diff".into(), "--cached".into(), "--stat".into()],
+    )
+    .await
+    .unwrap_or_default();
+    let working_stat = run_git(Some(repo), vec!["diff".into(), "--stat".into()])
+        .await
+        .unwrap_or_default();
+    let combined_diff = format!(
+        "Staged diff:\n{}\n\nWorking diff:\n{}",
+        staged_diff.trim(),
+        working_diff.trim()
+    );
+    let diff = truncate_for_prompt(&combined_diff, MAX_STAGED_DIFF_CHARS);
+    let repo_name = repo
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("repository");
+
+    Ok(format!(
+        "Repository: {repo_name}\nBranch: {}\n\nGit status:\n{}\n\nStaged files:\n{}\nWorking files:\n{}\n\nStaged stat:\n{}\nWorking stat:\n{}\n\nDiff{}:\n```diff\n{}\n```",
+        branch.trim(),
+        status.trim(),
+        staged_name_status.trim(),
+        working_name_status.trim(),
+        staged_stat.trim(),
+        working_stat.trim(),
+        if diff.truncated { " (truncated)" } else { "" },
+        diff.text
+    ))
+}
+
+async fn build_pr_context(repo: &Path) -> CommandResult<String> {
+    let base = pr_base_ref(repo).await?;
+    let branch = run_git(
+        Some(repo),
+        vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+    )
+    .await
+    .unwrap_or_else(|_| "unknown".to_string());
+    let log = run_git(
+        Some(repo),
+        vec![
+            "log".into(),
+            "--oneline".into(),
+            "--decorate".into(),
+            "--no-merges".into(),
+            format!("{base}..HEAD"),
+        ],
+    )
+    .await?;
+    if log.trim().is_empty() {
+        return invalid(
+            "NO_PR_COMMITS",
+            "Current branch does not have commits ahead of the detected base branch.",
+        );
+    }
+    let name_status = run_git(
+        Some(repo),
+        vec![
+            "diff".into(),
+            "--name-status".into(),
+            "--find-renames".into(),
+            base.clone(),
+            "HEAD".into(),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    let stat = run_git(
+        Some(repo),
+        vec!["diff".into(), "--stat".into(), base.clone(), "HEAD".into()],
+    )
+    .await
+    .unwrap_or_default();
+    let diff = run_git(
+        Some(repo),
+        vec![
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--find-renames".into(),
+            "--unified=60".into(),
+            base.clone(),
+            "HEAD".into(),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    let diff = truncate_for_prompt(&diff, MAX_STAGED_DIFF_CHARS);
+    let repo_name = repo
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("repository");
+
+    Ok(format!(
+        "Repository: {repo_name}\nBranch: {}\nBase: {base}\n\nCommits ahead of base:\n{}\n\nChanged files:\n{}\n\nDiff stat:\n{}\n\nDiff{}:\n```diff\n{}\n```",
+        branch.trim(),
+        log.trim(),
+        name_status.trim(),
+        stat.trim(),
+        if diff.truncated { " (truncated)" } else { "" },
+        diff.text
+    ))
+}
+
+async fn pr_base_ref(repo: &Path) -> CommandResult<String> {
+    let upstream = run_git(
+        Some(repo),
+        vec![
+            "rev-parse".into(),
+            "--abbrev-ref".into(),
+            "--symbolic-full-name".into(),
+            "@{u}".into(),
+        ],
+    )
+    .await
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty() && value != "@{u}");
+
+    let candidates = upstream
+        .into_iter()
+        .chain(["origin/main", "origin/master", "main", "master"].map(ToString::to_string));
+
+    for candidate in candidates {
+        if resolve_commit_sha(repo, &candidate).await.is_ok() {
+            return Ok(candidate);
+        }
+    }
+
+    invalid(
+        "NO_PR_BASE",
+        "Could not find an upstream, origin/main, origin/master, main, or master base for PR text.",
+    )
+}
+
 struct TruncatedText {
     text: String,
     truncated: bool,
@@ -2138,6 +3192,34 @@ fn parse_openai_commit_response(body_text: &str) -> CommandResult<AiCommitSugges
     })?;
 
     parse_commit_suggestion_text(&output)
+}
+
+fn parse_openai_branch_response(body_text: &str) -> CommandResult<AiBranchNameSuggestion> {
+    let body: OpenAiResponseBody =
+        serde_json::from_str(body_text).map_err(|error| AppError::AiFailed {
+            message: "OpenAI returned an unreadable response.".to_string(),
+            detail: error.to_string(),
+        })?;
+    let output = extract_openai_output_text(&body).ok_or_else(|| AppError::AiFailed {
+        message: openai_missing_output_message(&body),
+        detail: truncate_display_text(&redact_secrets(body_text), 2_000),
+    })?;
+
+    parse_branch_suggestion_text(&output)
+}
+
+fn parse_openai_pr_response(body_text: &str) -> CommandResult<AiPrDescriptionSuggestion> {
+    let body: OpenAiResponseBody =
+        serde_json::from_str(body_text).map_err(|error| AppError::AiFailed {
+            message: "OpenAI returned an unreadable response.".to_string(),
+            detail: error.to_string(),
+        })?;
+    let output = extract_openai_output_text(&body).ok_or_else(|| AppError::AiFailed {
+        message: openai_missing_output_message(&body),
+        detail: truncate_display_text(&redact_secrets(body_text), 2_000),
+    })?;
+
+    parse_pr_suggestion_text(&output)
 }
 
 fn extract_openai_output_text(body: &OpenAiResponseBody) -> Option<String> {
@@ -2230,6 +3312,57 @@ fn parse_commit_suggestion_text(text: &str) -> CommandResult<AiCommitSuggestion>
     normalize_commit_suggestion(summary, description)
 }
 
+fn parse_branch_suggestion_text(text: &str) -> CommandResult<AiBranchNameSuggestion> {
+    let cleaned = cleanup_openai_text(text);
+    let json_candidate = json_object_candidate(cleaned);
+    if let Some(json_candidate) = json_candidate {
+        let wire: AiBranchNameSuggestionWire =
+            serde_json::from_str(json_candidate).map_err(|error| AppError::AiFailed {
+                message: "OpenAI returned malformed branch JSON.".to_string(),
+                detail: error.to_string(),
+            })?;
+        return normalize_branch_suggestion(wire.name);
+    }
+
+    normalize_branch_suggestion(cleaned.lines().next().unwrap_or_default().to_string())
+}
+
+fn parse_pr_suggestion_text(text: &str) -> CommandResult<AiPrDescriptionSuggestion> {
+    let cleaned = cleanup_openai_text(text);
+    let json_candidate = json_object_candidate(cleaned);
+    if let Some(json_candidate) = json_candidate {
+        let wire: AiPrDescriptionSuggestionWire =
+            serde_json::from_str(json_candidate).map_err(|error| AppError::AiFailed {
+                message: "OpenAI returned malformed PR JSON.".to_string(),
+                detail: error.to_string(),
+            })?;
+        return normalize_pr_suggestion(wire.title, wire.description.unwrap_or_default());
+    }
+
+    let mut lines = cleaned.lines();
+    let title = lines.next().unwrap_or_default().trim().to_string();
+    let description = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    normalize_pr_suggestion(title, description)
+}
+
+fn cleanup_openai_text(text: &str) -> &str {
+    text.trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+}
+
+fn json_object_candidate(cleaned: &str) -> Option<&str> {
+    if cleaned.starts_with('{') {
+        return Some(cleaned);
+    }
+    if let (Some(start), Some(end)) = (cleaned.find('{'), cleaned.rfind('}')) {
+        return Some(&cleaned[start..=end]);
+    }
+    None
+}
+
 fn normalize_commit_suggestion(
     summary: String,
     description: String,
@@ -2246,6 +3379,50 @@ fn normalize_commit_suggestion(
         summary,
         description,
     })
+}
+
+fn normalize_branch_suggestion(name: String) -> CommandResult<AiBranchNameSuggestion> {
+    let name = name
+        .trim()
+        .trim_matches('"')
+        .trim_start_matches("branch:")
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return invalid(
+            "OPENAI_EMPTY_BRANCH_NAME",
+            "OpenAI did not return a branch name.",
+        );
+    }
+    if name.len() > 80
+        || name.starts_with('-')
+        || name.starts_with('/')
+        || name.ends_with('/')
+        || name.contains(' ')
+        || name.contains("..")
+        || name.contains("@{")
+        || name.contains("//")
+        || name.contains('\\')
+        || name.chars().any(|ch| ch.is_control())
+    {
+        return invalid(
+            "OPENAI_UNSAFE_BRANCH_NAME",
+            "OpenAI returned a branch name that is not safe to use.",
+        );
+    }
+    Ok(AiBranchNameSuggestion { name })
+}
+
+fn normalize_pr_suggestion(
+    title: String,
+    description: String,
+) -> CommandResult<AiPrDescriptionSuggestion> {
+    let title = title.trim().trim_matches('"').to_string();
+    let description = description.trim().to_string();
+    if title.is_empty() {
+        return invalid("OPENAI_EMPTY_PR_TITLE", "OpenAI did not return a PR title.");
+    }
+    Ok(AiPrDescriptionSuggestion { title, description })
 }
 
 fn clamp_history_limit(value: Option<u32>) -> u32 {
@@ -2348,6 +3525,8 @@ pub fn run() {
             git_discard,
             git_commit,
             git_commit_message_update,
+            git_commit_undo_last,
+            git_commit_squash_last,
             ai_openai_status,
             ai_openai_test_api_key,
             ai_openai_save_api_key,
@@ -2356,6 +3535,9 @@ pub fn run() {
             azure_devops_save_pat,
             azure_devops_clear_pat,
             ai_commit_message_generate,
+            ai_branch_name_generate,
+            ai_pr_description_generate,
+            git_undo_restore,
             git_branch_create,
             git_branch_checkout,
             git_branch_delete,
@@ -2610,6 +3792,71 @@ mod tests {
     }
 
     #[test]
+    fn parses_openai_branch_name_response() {
+        let body = r#"{
+            "status": "completed",
+            "output_text": "{\"name\":\"fix/auth-token-refresh\"}"
+        }"#;
+
+        let suggestion = parse_openai_branch_response(body).expect("branch name should parse");
+
+        assert_eq!(suggestion.name, "fix/auth-token-refresh");
+    }
+
+    #[test]
+    fn rejects_unsafe_openai_branch_names() {
+        let error =
+            normalize_branch_suggestion("../danger".to_string()).expect_err("branch should fail");
+        let serialized = serde_json::to_value(error).expect("error should serialize");
+
+        assert_eq!(serialized["code"], "OPENAI_UNSAFE_BRANCH_NAME");
+    }
+
+    #[test]
+    fn parses_openai_pr_response() {
+        let body = r###"{
+            "status": "completed",
+            "output_text": "{\"title\":\"Improve history controls\",\"description\":\"## Summary\\n- Add filters\\n\\n## Testing\\n- npm run build\"}"
+        }"###;
+
+        let suggestion = parse_openai_pr_response(body).expect("PR text should parse");
+
+        assert_eq!(suggestion.title, "Improve history controls");
+        assert!(suggestion.description.contains("Add filters"));
+    }
+
+    #[test]
+    fn validates_undo_snapshot_ids() {
+        assert!(validate_snapshot_id("1710000000000-before-commit").is_ok());
+        assert!(validate_snapshot_id("../bad").is_err());
+        assert!(validate_snapshot_id("bad/path").is_err());
+    }
+
+    #[tokio::test]
+    async fn rewords_older_linear_commit_in_temp_repo() {
+        let repo = init_test_repo("reword-older");
+        let first = commit_test_file(&repo, "file.txt", "one\n", "first commit");
+        let _second = commit_test_file(&repo, "file.txt", "two\n", "second commit");
+
+        reword_commit(&repo, &first, "first commit reworded")
+            .await
+            .expect("commit should reword");
+
+        let subjects = run_git_test(&repo, &["log", "--reverse", "--format=%s"]);
+        let subjects = subjects.lines().collect::<Vec<_>>();
+        let status = run_git_test(&repo, &["status", "--porcelain"]);
+
+        assert_eq!(subjects, vec!["first commit reworded", "second commit"]);
+        assert!(status.trim().is_empty());
+        assert!(!list_undo_snapshots(&repo)
+            .await
+            .expect("snapshots")
+            .is_empty());
+
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
     fn ignores_openai_reasoning_ids_when_extracting_text() {
         let body = r#"{
             "status": "completed",
@@ -2655,5 +3902,40 @@ mod tests {
             .as_str()
             .expect("message")
             .contains("max_output_tokens"));
+    }
+
+    fn init_test_repo(name: &str) -> PathBuf {
+        let repo = std::env::temp_dir().join(format!("opengit-{name}-{}", now_millis()));
+        fs::create_dir_all(&repo).expect("repo dir");
+        run_git_test(&repo, &["init"]);
+        run_git_test(&repo, &["config", "user.name", "OpenGit Test"]);
+        run_git_test(&repo, &["config", "user.email", "opengit@example.com"]);
+        repo
+    }
+
+    fn commit_test_file(repo: &Path, path: &str, contents: &str, message: &str) -> String {
+        fs::write(repo.join(path), contents).expect("write file");
+        run_git_test(repo, &["add", path]);
+        run_git_test(repo, &["commit", "-m", message]);
+        run_git_test(repo, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string()
+    }
+
+    fn run_git_test(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
     }
 }

@@ -125,6 +125,17 @@ export interface CommitFile {
   status: FileStatus;
 }
 
+export interface UndoSnapshot {
+  id: string;
+  label: string;
+  branch?: string;
+  headSha?: string;
+  refName?: string;
+  createdAt: string;
+  hasStagedPatch: boolean;
+  hasWorkingPatch: boolean;
+}
+
 export type FileStatus =
   | "added"
   | "modified"
@@ -172,4 +183,5 @@ export interface RepoSnapshot {
   stashes: Stash[];
   commits: Commit[];
   conflicts: Conflict[];
+  undoSnapshots: UndoSnapshot[];
 }

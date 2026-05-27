@@ -130,7 +130,19 @@ export const demoSnapshot: RepoSnapshot = {
       refs: ["tag: v0.1.0"]
     }
   ],
-  conflicts: []
+  conflicts: [],
+  undoSnapshots: [
+    {
+      id: "demo-before-commit",
+      label: "before commit",
+      branch: "main",
+      headSha: "aa8c8f252648b7efba0cb128e211c65f49ac1411",
+      refName: "refs/opengit/snapshots/demo-before-commit",
+      createdAt: String(Date.now() - 1000 * 60 * 8),
+      hasStagedPatch: true,
+      hasWorkingPatch: true
+    }
+  ]
 };
 
 export const demoDiff = `diff --git a/apps/desktop/src/App.tsx b/apps/desktop/src/App.tsx
