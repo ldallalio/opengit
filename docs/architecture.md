@@ -15,8 +15,9 @@
 2. TypeScript IPC wrapper calls Tauri commands and provides browser-demo fallbacks for design iteration.
 3. Rust commands validate paths and execute native Git with argv arrays.
 4. Git parsers normalize porcelain status, branches, remotes, stashes, history, diffs, and operation errors.
-5. Future cache layer will persist repository registry and indexed read models in SQLite.
-6. Future provider layer will add GitHub first behind provider adapter interfaces.
+5. Provider commands list connected account repositories behind provider-specific adapters.
+6. Future cache layer will persist repository registry and indexed read models in SQLite.
+7. Future provider support can add GitHub, GitLab, and Bitbucket behind the same repository catalog contracts.
 
 ## Safety Rules
 
@@ -26,12 +27,15 @@
 - Redact credentials from remote URLs before returning data to the UI.
 - Set `GIT_TERMINAL_PROMPT=0` so background commands do not hang waiting for credentials.
 - Prefer `--force-with-lease` over force push.
+- Provider API credentials stay in the operating system keychain and are never embedded in URLs, UI state, logs, or Git command arguments.
 
 ## Current IPC Surface
 
 - `repo_open(path)`
 - `repo_clone(url, destination)`
 - `repo_status(repo_path)`
+- `provider_accounts_status()`
+- `provider_repos_list(provider, local_paths)`
 - `git_stage(repo_path, paths)`
 - `git_unstage(repo_path, paths)`
 - `git_discard(repo_path, paths)`

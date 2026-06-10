@@ -1,4 +1,4 @@
-import type { CommitFile, RepoSnapshot } from "@opengit/core";
+import type { BranchInspection, CommitFile, ProviderRepoCatalog, RepoSnapshot } from "@opengit/core";
 
 export const demoSnapshot: RepoSnapshot = {
   repository: {
@@ -142,6 +142,56 @@ export const demoSnapshot: RepoSnapshot = {
       hasStagedPatch: true,
       hasWorkingPatch: true
     }
+  ],
+  branchStacks: [
+    {
+      id: "stack-demo",
+      name: "Commit graph polish",
+      trunk: "main",
+      status: "clean",
+      lastOperation: "Restack complete",
+      createdAt: String(Date.now() - 1000 * 60 * 60),
+      updatedAt: String(Date.now() - 1000 * 60 * 12),
+      items: [
+        {
+          id: "stack-item-demo",
+          branch: "feature/conflict-view",
+          baseBranch: "main",
+          order: 0,
+          headSha: "76bd0be0c79652c938fc363c4e77d278f3cb49ef",
+          upstream: "origin/feature/commit-graph",
+          status: "ahead"
+        }
+      ]
+    }
+  ],
+  parallelLanes: [
+    {
+      id: "lane-demo",
+      name: "Backend parser",
+      targetBranch: "main",
+      baseHead: "f5a84c5a962f9adf6cf3e6de1ef4b3f4ad30ec57",
+      applied: false,
+      status: "clean",
+      createdAt: String(Date.now() - 1000 * 60 * 28),
+      updatedAt: String(Date.now() - 1000 * 60 * 28),
+      paths: [
+        {
+          path: "apps/desktop/src-tauri/src/lib.rs",
+          status: "modified",
+          source: "working"
+        }
+      ]
+    }
+  ],
+  worktrees: [
+    {
+      path: "/Users/logan/Code/opengit",
+      branch: "main",
+      head: "f5a84c5a962f9adf6cf3e6de1ef4b3f4ad30ec57",
+      locked: false,
+      prunable: false
+    }
   ]
 };
 
@@ -172,3 +222,111 @@ export const demoCommitFiles: CommitFile[] = [
     status: "added"
   }
 ];
+
+export const demoBranchInspection: BranchInspection = {
+  branch: demoSnapshot.branches[0],
+  kind: "local",
+  upstream: "origin/main",
+  defaultBranch: "origin/main",
+  baseRef: "origin/main",
+  headSha: demoSnapshot.commits[0]?.sha,
+  lastCommit: demoSnapshot.commits[0],
+  aheadBehindUpstream: { ahead: 2, behind: 0 },
+  aheadBehindDefault: { ahead: 2, behind: 0 },
+  status: "ahead",
+  recentCommits: demoSnapshot.commits.slice(0, 5),
+  diffSummary: {
+    baseRef: "origin/main",
+    fileCount: 3,
+    additions: 84,
+    deletions: 21,
+    files: demoCommitFiles
+  }
+};
+
+export const demoProviderCatalog: ProviderRepoCatalog = {
+  provider: "azure-devops",
+  refreshedAt: String(Date.now()),
+  accounts: [
+    {
+      id: "hubley-dallalio",
+      provider: "azure-devops",
+      name: "Hubley Dallalio Workspace",
+      displayName: "Hubley Dallalio Workspace",
+      url: "https://dev.azure.com/hubley"
+    }
+  ],
+  projects: [
+    {
+      id: "hubley-spfx",
+      provider: "azure-devops",
+      accountId: "hubley-dallalio",
+      name: "hubley spfx",
+      url: "https://dev.azure.com/hubley/hubley%20spfx"
+    },
+    {
+      id: "mobile",
+      provider: "azure-devops",
+      accountId: "hubley-dallalio",
+      name: "mobile",
+      url: "https://dev.azure.com/hubley/mobile"
+    }
+  ],
+  repositories: [
+    {
+      id: "azure-devops:hubley:hubley spfx:hubley spfx",
+      provider: "azure-devops",
+      accountId: "hubley-dallalio",
+      accountName: "Hubley Dallalio Workspace",
+      projectId: "hubley-spfx",
+      projectName: "hubley spfx",
+      name: "hubley spfx",
+      defaultBranch: "main",
+      webUrl: "https://dev.azure.com/hubley/hubley%20spfx/_git/hubley%20spfx",
+      cloneUrl: {
+        kind: "https",
+        url: "https://dev.azure.com/hubley/hubley%20spfx/_git/hubley%20spfx",
+        safeUrl: "https://dev.azure.com/hubley/hubley%20spfx/_git/hubley%20spfx"
+      },
+      localMatch: {
+        status: "cloned",
+        path: "/Users/logandallalio/Documents/Hubley/hubley spfx",
+        matchedRemote: "https://dev.azure.com/hubley/hubley%20spfx/_git/hubley%20spfx"
+      }
+    },
+    {
+      id: "azure-devops:hubley:mobile:hubleyRNMobile",
+      provider: "azure-devops",
+      accountId: "hubley-dallalio",
+      accountName: "Hubley Dallalio Workspace",
+      projectId: "mobile",
+      projectName: "mobile",
+      name: "hubleyRNMobile",
+      defaultBranch: "main",
+      webUrl: "https://dev.azure.com/hubley/mobile/_git/hubleyRNMobile",
+      cloneUrl: {
+        kind: "https",
+        url: "https://dev.azure.com/hubley/mobile/_git/hubleyRNMobile",
+        safeUrl: "https://dev.azure.com/hubley/mobile/_git/hubleyRNMobile"
+      },
+      localMatch: { status: "not-cloned" }
+    },
+    {
+      id: "azure-devops:hubley:hubley spfx:credential-manager",
+      provider: "azure-devops",
+      accountId: "hubley-dallalio",
+      accountName: "Hubley Dallalio Workspace",
+      projectId: "hubley-spfx",
+      projectName: "hubley spfx",
+      name: "credential-manager",
+      defaultBranch: "master",
+      webUrl: "https://dev.azure.com/hubley/hubley%20spfx/_git/credential-manager",
+      cloneUrl: {
+        kind: "https",
+        url: "https://dev.azure.com/hubley/hubley%20spfx/_git/credential-manager",
+        safeUrl: "https://dev.azure.com/hubley/hubley%20spfx/_git/credential-manager"
+      },
+      localMatch: { status: "not-cloned" }
+    }
+  ]
+};

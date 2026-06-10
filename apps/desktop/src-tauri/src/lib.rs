@@ -40,6 +40,12 @@ enum AppError {
     SecureStorage(String),
     #[error("OpenAI request failed")]
     AiFailed { message: String, detail: String },
+    #[error("{message}")]
+    ProviderFailed {
+        code: &'static str,
+        message: String,
+        detail: String,
+    },
 }
 
 impl Serialize for AppError {
@@ -89,6 +95,15 @@ impl Serialize for AppError {
                 message: message.clone(),
                 detail: Some(redact_secrets(detail)),
             },
+            AppError::ProviderFailed {
+                code,
+                message,
+                detail,
+            } => ErrorBody {
+                code,
+                message: message.clone(),
+                detail: Some(redact_secrets(detail)),
+            },
         };
 
         body.serialize(serializer)
@@ -113,7 +128,7 @@ struct Repository {
     worktree_state: WorktreeState,
 }
 
-#[derive(Debug, Serialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum GitProvider {
     Github,
@@ -142,7 +157,7 @@ enum GitOperationState {
     CherryPicking,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Commit {
     sha: String,
@@ -154,7 +169,7 @@ struct Commit {
     refs: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Branch {
     name: String,
@@ -164,6 +179,62 @@ struct Branch {
     behind: Option<i32>,
     is_current: bool,
     is_protected: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchInspection {
+    branch: Branch,
+    kind: BranchInspectionKind,
+    upstream: Option<String>,
+    default_branch: Option<String>,
+    base_ref: Option<String>,
+    head_sha: Option<String>,
+    last_commit: Option<Commit>,
+    ahead_behind_upstream: Option<AheadBehind>,
+    ahead_behind_default: Option<AheadBehind>,
+    status: BranchInspectionStatus,
+    recent_commits: Vec<Commit>,
+    diff_summary: Option<BranchDiffSummary>,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum BranchInspectionKind {
+    Local,
+    Remote,
+    Tag,
+    Unknown,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AheadBehind {
+    ahead: i32,
+    behind: i32,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum BranchInspectionStatus {
+    Current,
+    UpToDate,
+    Ahead,
+    Behind,
+    Diverged,
+    NoUpstream,
+    Unknown,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchDiffSummary {
+    base_ref: String,
+    file_count: usize,
+    additions: Option<i32>,
+    deletions: Option<i32>,
+    files: Vec<CommitFile>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -220,7 +291,137 @@ struct UndoSnapshot {
     has_working_patch: bool,
 }
 
-#[derive(Debug, Serialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestRef {
+    provider: GitProvider,
+    provider_id: Option<String>,
+    url: Option<String>,
+    state: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BranchStack {
+    id: String,
+    name: String,
+    trunk: String,
+    items: Vec<BranchStackItem>,
+    status: BranchStackStatus,
+    last_operation: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum BranchStackStatus {
+    Clean,
+    NeedsRestack,
+    Conflicted,
+    Unknown,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BranchStackItem {
+    id: String,
+    branch: String,
+    base_branch: String,
+    order: usize,
+    head_sha: Option<String>,
+    upstream: Option<String>,
+    pr_ref: Option<PullRequestRef>,
+    status: BranchStackItemStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum BranchStackItemStatus {
+    Clean,
+    Ahead,
+    Behind,
+    NeedsRestack,
+    Conflicted,
+    Missing,
+    Unknown,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ParallelLane {
+    id: String,
+    name: String,
+    target_branch: String,
+    base_head: String,
+    applied: bool,
+    status: ParallelLaneStatus,
+    paths: Vec<ParallelLanePath>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum ParallelLaneStatus {
+    Clean,
+    Dirty,
+    Blocked,
+    Conflicted,
+    Committed,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ParallelLanePath {
+    path: String,
+    old_path: Option<String>,
+    status: FileStatus,
+    source: ParallelLanePathSource,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum ParallelLanePathSource {
+    Working,
+    Staged,
+    Untracked,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GitWorkflowOperation {
+    id: String,
+    kind: GitWorkflowOperationKind,
+    label: String,
+    status: GitWorkflowOperationStatus,
+    stack_id: Option<String>,
+    lane_id: Option<String>,
+    branch: Option<String>,
+    base_branch: Option<String>,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum GitWorkflowOperationKind {
+    StackRestack,
+    LaneApply,
+    LaneUnapply,
+    LaneCommit,
+    Worktree,
+    Unknown,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum GitWorkflowOperationStatus {
+    Running,
+    Conflicted,
+    Blocked,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum FileStatus {
     Added,
@@ -256,6 +457,16 @@ struct ConflictVersions {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct Worktree {
+    path: String,
+    branch: Option<String>,
+    head: String,
+    locked: bool,
+    prunable: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RepoSnapshot {
     repository: Repository,
     current_branch: Option<String>,
@@ -269,6 +480,10 @@ struct RepoSnapshot {
     commits: Vec<Commit>,
     conflicts: Vec<Conflict>,
     undo_snapshots: Vec<UndoSnapshot>,
+    branch_stacks: Vec<BranchStack>,
+    parallel_lanes: Vec<ParallelLane>,
+    worktrees: Vec<Worktree>,
+    active_operation: Option<GitWorkflowOperation>,
 }
 
 #[derive(Debug, Default)]
@@ -288,6 +503,73 @@ struct BranchCreateRequest {
     start_point: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StackCreateRequest {
+    repo_path: String,
+    name: String,
+    trunk: String,
+    branches: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StackCreateChildRequest {
+    repo_path: String,
+    stack_id: String,
+    base_branch: String,
+    new_branch_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StackAddBranchRequest {
+    repo_path: String,
+    stack_id: String,
+    branch: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StackReorderRequest {
+    repo_path: String,
+    stack_id: String,
+    ordered_branch_names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LaneCreateRequest {
+    repo_path: String,
+    name: String,
+    target_branch: String,
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LaneAssignPathsRequest {
+    repo_path: String,
+    lane_id: String,
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LaneCommitRequest {
+    repo_path: String,
+    lane_id: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LaneMaterializeBranchRequest {
+    repo_path: String,
+    lane_id: String,
+    branch_name: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OpenAiStatus {
@@ -298,6 +580,122 @@ struct OpenAiStatus {
 #[serde(rename_all = "camelCase")]
 struct AzureDevOpsStatus {
     configured: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderAccountStatus {
+    provider: GitProvider,
+    configured: bool,
+    status: ProviderConnectionStatus,
+    label: String,
+    detail: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+enum ProviderConnectionStatus {
+    Connected,
+    MissingToken,
+    AuthFailed,
+    Unavailable,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderAccount {
+    id: String,
+    provider: GitProvider,
+    name: String,
+    display_name: Option<String>,
+    url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderProject {
+    id: String,
+    provider: GitProvider,
+    account_id: String,
+    name: String,
+    url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderCloneUrl {
+    kind: ProviderCloneUrlKind,
+    url: String,
+    safe_url: String,
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+enum ProviderCloneUrlKind {
+    Https,
+    Ssh,
+    Unknown,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum LocalRepoMatchStatus {
+    NotCloned,
+    Cloned,
+    MissingPath,
+    Current,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalRepoMatch {
+    status: LocalRepoMatchStatus,
+    path: Option<String>,
+    matched_remote: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderRepository {
+    id: String,
+    provider: GitProvider,
+    account_id: String,
+    account_name: String,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    name: String,
+    default_branch: Option<String>,
+    web_url: Option<String>,
+    clone_url: Option<ProviderCloneUrl>,
+    local_match: LocalRepoMatch,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderRepoCatalog {
+    provider: GitProvider,
+    accounts: Vec<ProviderAccount>,
+    projects: Vec<ProviderProject>,
+    repositories: Vec<ProviderRepository>,
+    refreshed_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalRepositoryRef {
+    path: String,
+    exists: bool,
+    is_repository: bool,
+    remotes: Vec<Remote>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderReposListRequest {
+    provider: GitProvider,
+    local_paths: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -942,6 +1340,32 @@ async fn azure_devops_clear_pat() -> CommandResult<AzureDevOpsStatus> {
 }
 
 #[tauri::command]
+async fn provider_accounts_status() -> CommandResult<Vec<ProviderAccountStatus>> {
+    Ok(vec![ProviderAccountStatus {
+        provider: GitProvider::AzureDevops,
+        configured: false,
+        status: ProviderConnectionStatus::Unavailable,
+        label: "Azure DevOps".to_string(),
+        detail: Some(
+            "OpenGit checks the keychain only when you save a PAT or use Azure DevOps."
+                .to_string(),
+        ),
+    }])
+}
+
+#[tauri::command]
+async fn provider_repos_list(request: ProviderReposListRequest) -> CommandResult<ProviderRepoCatalog> {
+    match request.provider {
+        GitProvider::AzureDevops => list_azure_devops_repositories(request.local_paths).await,
+        _ => Err(AppError::ProviderFailed {
+            code: "PROVIDER_UNAVAILABLE",
+            message: "This provider is not supported yet.".to_string(),
+            detail: "Only Azure DevOps repository management is implemented.".to_string(),
+        }),
+    }
+}
+
+#[tauri::command]
 async fn ai_commit_message_generate(
     repo_path: String,
     model: Option<String>,
@@ -1101,9 +1525,518 @@ async fn git_branch_rename(
     run_git_with_safety_snapshot(
         &repo,
         "before branch rename",
-        vec!["branch".into(), "-m".into(), old_name, new_name],
+        vec!["branch".into(), "-m".into(), old_name.clone(), new_name.clone()],
     )
     .await?;
+    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    for stack in &mut stacks {
+        if stack.trunk == old_name {
+            stack.trunk = new_name.clone();
+        }
+        for item in &mut stack.items {
+            if item.branch == old_name {
+                item.branch = new_name.clone();
+            }
+            if item.base_branch == old_name {
+                item.base_branch = new_name.clone();
+            }
+        }
+        stack.updated_at = now_millis().to_string();
+    }
+    write_branch_stacks(&repo, &stacks).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_branch_inspect(
+    repo_path: String,
+    branch_ref: String,
+) -> CommandResult<BranchInspection> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    inspect_branch(&repo, &branch_ref).await
+}
+
+#[tauri::command]
+async fn git_stack_list(repo_path: String) -> CommandResult<Vec<BranchStack>> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let branches = parse_branches(
+        &run_git(
+            Some(&repo),
+            vec![
+                "branch".into(),
+                "--all".into(),
+                "--format=%(refname:short)%1f%(refname)%1f%(upstream:short)%1f%(HEAD)".into(),
+            ],
+        )
+        .await?,
+        0,
+        0,
+    );
+    Ok(enriched_branch_stacks(&repo, &branches).await)
+}
+
+#[tauri::command]
+async fn git_stack_create(request: StackCreateRequest) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&request.repo_path).await?;
+    validate_ref_arg(&request.trunk, "stack trunk")?;
+    if !git_ref_exists(&repo, &request.trunk).await {
+        return invalid("INVALID_REF", "Stack trunk branch does not exist.");
+    }
+    let mut branches = Vec::new();
+    for branch in request.branches {
+        validate_ref_arg(&branch, "stack branch")?;
+        if branch != request.trunk && git_ref_exists(&repo, &branch).await {
+            branches.push(branch);
+        }
+    }
+    branches.dedup();
+    let now = now_millis().to_string();
+    let mut stack = BranchStack {
+        id: metadata_id("stack", &request.name),
+        name: truncate_display_text(request.name.trim(), 80),
+        trunk: request.trunk,
+        items: branches
+            .into_iter()
+            .enumerate()
+            .map(|(index, branch)| BranchStackItem {
+                id: metadata_id("stack-item", &branch),
+                branch,
+                base_branch: String::new(),
+                order: index,
+                head_sha: None,
+                upstream: None,
+                pr_ref: None,
+                status: BranchStackItemStatus::Unknown,
+            })
+            .collect(),
+        status: BranchStackStatus::Unknown,
+        last_operation: Some("Stack created".to_string()),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    stack_resequence_items(&mut stack);
+    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    stacks.push(stack);
+    write_branch_stacks(&repo, &stacks).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_stack_create_child(request: StackCreateChildRequest) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&request.repo_path).await?;
+    let stack_id = validate_metadata_id(&request.stack_id, "stack id")?;
+    validate_ref_arg(&request.base_branch, "base branch")?;
+    validate_ref_arg(&request.new_branch_name, "new branch name")?;
+    create_safety_snapshot(&repo, "before stack child branch").await?;
+    run_git(
+        Some(&repo),
+        vec![
+            "branch".into(),
+            request.new_branch_name.clone(),
+            request.base_branch.clone(),
+        ],
+    )
+    .await?;
+
+    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let stack = find_stack_mut(&mut stacks, &stack_id)?;
+    let insert_at = stack
+        .items
+        .iter()
+        .position(|item| item.branch == request.base_branch)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    stack.items.insert(
+        insert_at,
+        BranchStackItem {
+            id: metadata_id("stack-item", &request.new_branch_name),
+            branch: request.new_branch_name,
+            base_branch: request.base_branch,
+            order: insert_at,
+            head_sha: None,
+            upstream: None,
+            pr_ref: None,
+            status: BranchStackItemStatus::Unknown,
+        },
+    );
+    stack.last_operation = Some("Child branch created".to_string());
+    stack_resequence_items(stack);
+    write_branch_stacks(&repo, &stacks).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_stack_add_branch(request: StackAddBranchRequest) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&request.repo_path).await?;
+    let stack_id = validate_metadata_id(&request.stack_id, "stack id")?;
+    validate_ref_arg(&request.branch, "stack branch")?;
+    if !git_ref_exists(&repo, &request.branch).await {
+        return invalid("INVALID_REF", "Branch does not exist.");
+    }
+    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let stack = find_stack_mut(&mut stacks, &stack_id)?;
+    if stack.trunk == request.branch || stack.items.iter().any(|item| item.branch == request.branch) {
+        return invalid("STACK_DUPLICATE_BRANCH", "That branch is already in this stack.");
+    }
+    let order = stack.items.len();
+    let base_branch = stack
+        .items
+        .last()
+        .map(|item| item.branch.clone())
+        .unwrap_or_else(|| stack.trunk.clone());
+    stack.items.push(BranchStackItem {
+        id: metadata_id("stack-item", &request.branch),
+        branch: request.branch.clone(),
+        base_branch,
+        order,
+        head_sha: None,
+        upstream: None,
+        pr_ref: None,
+        status: BranchStackItemStatus::Unknown,
+    });
+    stack.last_operation = Some(format!("Added {} to stack", request.branch));
+    stack_resequence_items(stack);
+    write_branch_stacks(&repo, &stacks).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_stack_reorder(request: StackReorderRequest) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&request.repo_path).await?;
+    let stack_id = validate_metadata_id(&request.stack_id, "stack id")?;
+    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let stack = find_stack_mut(&mut stacks, &stack_id)?;
+    let mut reordered = Vec::new();
+    for branch in request.ordered_branch_names {
+        validate_ref_arg(&branch, "stack branch")?;
+        if let Some(index) = stack.items.iter().position(|item| item.branch == branch) {
+            reordered.push(stack.items.remove(index));
+        }
+    }
+    reordered.extend(stack.items.drain(..));
+    stack.items = reordered;
+    stack.last_operation = Some("Stack order updated".to_string());
+    stack_resequence_items(stack);
+    write_branch_stacks(&repo, &stacks).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_stack_remove_branch(
+    repo_path: String,
+    stack_id: String,
+    branch: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let stack_id = validate_metadata_id(&stack_id, "stack id")?;
+    validate_ref_arg(&branch, "stack branch")?;
+    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let stack = find_stack_mut(&mut stacks, &stack_id)?;
+    stack.items.retain(|item| item.branch != branch);
+    stack.last_operation = Some(format!("Removed {branch} from stack"));
+    stack_resequence_items(stack);
+    write_branch_stacks(&repo, &stacks).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_stack_restack(repo_path: String, stack_id: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let stack_id = validate_metadata_id(&stack_id, "stack id")?;
+    ensure_clean_worktree(&repo, "Restack").await?;
+    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let stack = find_stack_mut(&mut stacks, &stack_id)?.clone();
+    let original_branch = current_branch_name(&repo).await;
+    create_safety_snapshot(&repo, "before stack restack").await?;
+
+    for item in &stack.items {
+        let operation = GitWorkflowOperation {
+            id: metadata_id("operation", "stack-restack"),
+            kind: GitWorkflowOperationKind::StackRestack,
+            label: format!("Restacking {} onto {}", item.branch, item.base_branch),
+            status: GitWorkflowOperationStatus::Running,
+            stack_id: Some(stack.id.clone()),
+            lane_id: None,
+            branch: Some(item.branch.clone()),
+            base_branch: Some(item.base_branch.clone()),
+            created_at: now_millis().to_string(),
+        };
+        write_active_operation(&repo, &operation).await?;
+        run_git(Some(&repo), vec!["checkout".into(), item.branch.clone()]).await?;
+        if let Err(error) = run_git(Some(&repo), vec!["rebase".into(), item.base_branch.clone()]).await {
+            let mut conflicted = operation;
+            conflicted.status = GitWorkflowOperationStatus::Conflicted;
+            write_active_operation(&repo, &conflicted).await?;
+            if let Some(snapshot) = snapshot_for_interrupted_operation(&repo).await? {
+                return Ok(snapshot);
+            }
+            return Err(error);
+        }
+    }
+
+    clear_active_operation(&repo).await?;
+    if let Some(branch) = original_branch {
+        if branch != "(detached)" && branch != "HEAD" {
+            run_git(Some(&repo), vec!["checkout".into(), branch]).await?;
+        }
+    }
+    let stack = find_stack_mut(&mut stacks, &stack_id)?;
+    stack.last_operation = Some("Restack complete".to_string());
+    stack.updated_at = now_millis().to_string();
+    write_branch_stacks(&repo, &stacks).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_stack_sync_trunk(repo_path: String, stack_id: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let stack_id = validate_metadata_id(&stack_id, "stack id")?;
+    ensure_clean_worktree(&repo, "Sync trunk").await?;
+    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let stack = find_stack_mut(&mut stacks, &stack_id)?.clone();
+    create_safety_snapshot(&repo, "before stack trunk sync").await?;
+    let original_branch = current_branch_name(&repo).await;
+    run_git(Some(&repo), vec!["checkout".into(), stack.trunk.clone()]).await?;
+    run_git(Some(&repo), vec!["pull".into(), "--ff-only".into()]).await?;
+    if let Some(branch) = original_branch {
+        if branch != stack.trunk && branch != "(detached)" && branch != "HEAD" {
+            run_git(Some(&repo), vec!["checkout".into(), branch]).await?;
+        }
+    }
+    let stack = find_stack_mut(&mut stacks, &stack_id)?;
+    stack.last_operation = Some("Trunk synced".to_string());
+    stack.updated_at = now_millis().to_string();
+    write_branch_stacks(&repo, &stacks).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_stack_push(repo_path: String, stack_id: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let stack_id = validate_metadata_id(&stack_id, "stack id")?;
+    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let stack = find_stack_mut(&mut stacks, &stack_id)?.clone();
+    let remotes = parse_remotes(&run_git(Some(&repo), vec!["remote".into(), "-v".into()]).await?);
+    let remote = remotes
+        .first()
+        .ok_or_else(|| AppError::InvalidInput {
+            code: "REMOTE_MISSING",
+            message: "Add a remote before pushing a stack.".to_string(),
+        })?
+        .name
+        .clone();
+    create_safety_snapshot(&repo, "before stack push").await?;
+    for item in &stack.items {
+        run_git(
+            Some(&repo),
+            vec![
+                "push".into(),
+                "-u".into(),
+                remote.clone(),
+                item.branch.clone(),
+            ],
+        )
+        .await?;
+    }
+    let stack = find_stack_mut(&mut stacks, &stack_id)?;
+    stack.last_operation = Some("Stack pushed".to_string());
+    stack.updated_at = now_millis().to_string();
+    write_branch_stacks(&repo, &stacks).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_lane_list(repo_path: String) -> CommandResult<Vec<ParallelLane>> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    read_parallel_lanes(&repo).await
+}
+
+#[tauri::command]
+async fn git_lane_create(request: LaneCreateRequest) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&request.repo_path).await?;
+    validate_ref_arg(&request.target_branch, "target branch")?;
+    if !git_ref_exists(&repo, &request.target_branch).await {
+        return invalid("INVALID_REF", "Lane target branch does not exist.");
+    }
+    let base_head = branch_head_sha(&repo, &request.target_branch)
+        .await
+        .unwrap_or_default();
+    create_safety_snapshot(&repo, "before parallel lane create").await?;
+    let now = now_millis().to_string();
+    let mut lane = ParallelLane {
+        id: metadata_id("lane", &request.name),
+        name: truncate_display_text(request.name.trim(), 72),
+        target_branch: request.target_branch,
+        base_head,
+        applied: false,
+        status: ParallelLaneStatus::Clean,
+        paths: Vec::new(),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    capture_paths_into_lane(&repo, &mut lane, &request.paths).await?;
+    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    lanes.push(lane);
+    write_parallel_lanes(&repo, &lanes).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_lane_assign_paths(request: LaneAssignPathsRequest) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&request.repo_path).await?;
+    let lane_id = validate_metadata_id(&request.lane_id, "lane id")?;
+    create_safety_snapshot(&repo, "before assign to parallel lane").await?;
+    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let lane = find_lane_mut(&mut lanes, &lane_id)?;
+    if lane.applied {
+        return invalid("LANE_APPLIED", "Unapply this lane before assigning more files to it.");
+    }
+    capture_paths_into_lane(&repo, lane, &request.paths).await?;
+    write_parallel_lanes(&repo, &lanes).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_lane_apply(repo_path: String, lane_id: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let lane_id = validate_metadata_id(&lane_id, "lane id")?;
+    create_safety_snapshot(&repo, "before parallel lane apply").await?;
+    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let lane = find_lane_mut(&mut lanes, &lane_id)?;
+    let operation = GitWorkflowOperation {
+        id: metadata_id("operation", "lane-apply"),
+        kind: GitWorkflowOperationKind::LaneApply,
+        label: format!("Applying lane {}", lane.name),
+        status: GitWorkflowOperationStatus::Running,
+        stack_id: None,
+        lane_id: Some(lane.id.clone()),
+        branch: Some(lane.target_branch.clone()),
+        base_branch: None,
+        created_at: now_millis().to_string(),
+    };
+    write_active_operation(&repo, &operation).await?;
+    if let Err(error) = apply_lane_internal(&repo, lane).await {
+        lane.status = ParallelLaneStatus::Blocked;
+        let mut blocked = operation;
+        blocked.status = GitWorkflowOperationStatus::Blocked;
+        write_active_operation(&repo, &blocked).await?;
+        write_parallel_lanes(&repo, &lanes).await?;
+        return Err(error);
+    }
+    clear_active_operation(&repo).await?;
+    write_parallel_lanes(&repo, &lanes).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_lane_unapply(repo_path: String, lane_id: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let lane_id = validate_metadata_id(&lane_id, "lane id")?;
+    create_safety_snapshot(&repo, "before parallel lane unapply").await?;
+    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let lane = find_lane_mut(&mut lanes, &lane_id)?;
+    let operation = GitWorkflowOperation {
+        id: metadata_id("operation", "lane-unapply"),
+        kind: GitWorkflowOperationKind::LaneUnapply,
+        label: format!("Unapplying lane {}", lane.name),
+        status: GitWorkflowOperationStatus::Running,
+        stack_id: None,
+        lane_id: Some(lane.id.clone()),
+        branch: Some(lane.target_branch.clone()),
+        base_branch: None,
+        created_at: now_millis().to_string(),
+    };
+    write_active_operation(&repo, &operation).await?;
+    if let Err(error) = unapply_lane_internal(&repo, lane).await {
+        lane.status = ParallelLaneStatus::Blocked;
+        let mut blocked = operation;
+        blocked.status = GitWorkflowOperationStatus::Blocked;
+        write_active_operation(&repo, &blocked).await?;
+        write_parallel_lanes(&repo, &lanes).await?;
+        return Err(error);
+    }
+    clear_active_operation(&repo).await?;
+    write_parallel_lanes(&repo, &lanes).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_lane_commit(request: LaneCommitRequest) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&request.repo_path).await?;
+    if request.message.trim().is_empty() {
+        return invalid("EMPTY_COMMIT_MESSAGE", "Commit message is required.");
+    }
+    let lane_id = validate_metadata_id(&request.lane_id, "lane id")?;
+    create_safety_snapshot(&repo, "before parallel lane commit").await?;
+    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let lane = find_lane_mut(&mut lanes, &lane_id)?;
+    let current = current_branch_name(&repo).await.unwrap_or_default();
+    if current != lane.target_branch {
+        return invalid("LANE_TARGET_BRANCH", "Checkout the lane target branch before committing this lane.");
+    }
+    if !lane.applied {
+        apply_lane_internal(&repo, lane).await?;
+    }
+    let paths = lane.paths.iter().map(|path| path.path.clone()).collect::<Vec<_>>();
+    run_git(Some(&repo), git_args_with_paths(&["add"], &paths)).await?;
+    run_git(
+        Some(&repo),
+        vec!["commit".into(), "-m".into(), request.message.trim().to_string()],
+    )
+    .await?;
+    lane.applied = false;
+    lane.status = ParallelLaneStatus::Committed;
+    lane.updated_at = now_millis().to_string();
+    write_parallel_lanes(&repo, &lanes).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_lane_discard(repo_path: String, lane_id: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let lane_id = validate_metadata_id(&lane_id, "lane id")?;
+    create_safety_snapshot(&repo, "before parallel lane discard").await?;
+    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    if let Some(index) = lanes.iter().position(|lane| lane.id == lane_id) {
+        let mut lane = lanes[index].clone();
+        if lane.applied {
+            unapply_lane_internal(&repo, &mut lane).await?;
+        }
+        let dir = lane_dir(&repo, &lane_id).await?;
+        if dir.exists() {
+            fs::remove_dir_all(dir)?;
+        }
+        lanes.remove(index);
+    }
+    write_parallel_lanes(&repo, &lanes).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_lane_materialize_branch(request: LaneMaterializeBranchRequest) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&request.repo_path).await?;
+    validate_ref_arg(&request.branch_name, "branch name")?;
+    let lane_id = validate_metadata_id(&request.lane_id, "lane id")?;
+    if git_ref_exists(&repo, &format!("refs/heads/{}", request.branch_name)).await {
+        return invalid("BRANCH_EXISTS", "A branch with that name already exists.");
+    }
+    ensure_clean_worktree(&repo, "Materialize lane").await?;
+    create_safety_snapshot(&repo, "before materialize parallel lane").await?;
+    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let lane = find_lane_mut(&mut lanes, &lane_id)?;
+    run_git(
+        Some(&repo),
+        vec![
+            "checkout".into(),
+            "-b".into(),
+            request.branch_name.clone(),
+            lane.target_branch.clone(),
+        ],
+    )
+    .await?;
+    lane.target_branch = request.branch_name;
+    apply_lane_internal(&repo, lane).await?;
+    write_parallel_lanes(&repo, &lanes).await?;
     build_snapshot(&repo, None).await
 }
 
@@ -1299,7 +2232,7 @@ async fn git_conflict_mark_resolved(
 #[tauri::command]
 async fn git_operation_continue(repo_path: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
-    match detect_git_operation(&repo).await {
+    let result = match detect_git_operation(&repo).await {
         GitOperationState::Rebasing => {
             run_git_snapshot_operation(
                 &repo,
@@ -1328,7 +2261,11 @@ async fn git_operation_continue(repo_path: String) -> CommandResult<RepoSnapshot
             "NO_GIT_OPERATION",
             "There is no merge, rebase, or cherry-pick to continue.",
         ),
+    };
+    if result.is_ok() {
+        let _ = clear_active_operation(&repo).await;
     }
+    result
 }
 
 #[tauri::command]
@@ -1367,6 +2304,7 @@ async fn git_operation_abort(repo_path: String) -> CommandResult<RepoSnapshot> {
         }
     }
 
+    clear_active_operation(&repo).await?;
     build_snapshot(&repo, None).await
 }
 
@@ -1589,6 +2527,10 @@ async fn build_snapshot(repo: &Path, history_limit: Option<u32>) -> CommandResul
             .unwrap_or_default(),
     );
     let undo_snapshots = list_undo_snapshots(repo).await.unwrap_or_default();
+    let branch_stacks = enriched_branch_stacks(repo, &branches).await;
+    let parallel_lanes = read_parallel_lanes(repo).await.unwrap_or_default();
+    let worktrees = list_worktrees(repo).await.unwrap_or_default();
+    let active_operation = read_active_operation(repo).await.unwrap_or_default();
 
     let worktree_state = detect_worktree_state(repo, &branch_status, &changes).await;
     let name = repo
@@ -1623,6 +2565,10 @@ async fn build_snapshot(repo: &Path, history_limit: Option<u32>) -> CommandResul
         commits,
         conflicts,
         undo_snapshots,
+        branch_stacks,
+        parallel_lanes,
+        worktrees,
+        active_operation,
     })
 }
 
@@ -1942,6 +2888,897 @@ async fn undo_snapshot_dir(repo: &Path) -> CommandResult<PathBuf> {
         );
     };
     Ok(git_dir.join("opengit").join("snapshots"))
+}
+
+async fn opengit_dir(repo: &Path) -> CommandResult<PathBuf> {
+    let Some(git_dir) = git_dir_path(repo).await else {
+        return invalid(
+            "INVALID_REPOSITORY",
+            "Repository Git directory could not be resolved.",
+        );
+    };
+    Ok(git_dir.join("opengit"))
+}
+
+async fn stacks_file(repo: &Path) -> CommandResult<PathBuf> {
+    Ok(opengit_dir(repo).await?.join("stacks").join("stacks.json"))
+}
+
+async fn lanes_file(repo: &Path) -> CommandResult<PathBuf> {
+    Ok(opengit_dir(repo).await?.join("lanes").join("lanes.json"))
+}
+
+async fn lane_dir(repo: &Path, lane_id: &str) -> CommandResult<PathBuf> {
+    let lane_id = validate_metadata_id(lane_id, "lane id")?;
+    Ok(opengit_dir(repo).await?.join("lanes").join(lane_id))
+}
+
+async fn active_operation_file(repo: &Path) -> CommandResult<PathBuf> {
+    Ok(opengit_dir(repo)
+        .await?
+        .join("operations")
+        .join("active.json"))
+}
+
+async fn read_branch_stacks(repo: &Path) -> CommandResult<Vec<BranchStack>> {
+    let path = stacks_file(repo).await?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let body = fs::read_to_string(path)?;
+    serde_json::from_str(&body).map_err(|error| AppError::InvalidInput {
+        code: "INVALID_STACK_METADATA",
+        message: format!("Stack metadata is unreadable: {error}"),
+    })
+}
+
+async fn write_branch_stacks(repo: &Path, stacks: &[BranchStack]) -> CommandResult<()> {
+    let path = stacks_file(repo).await?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_vec_pretty(stacks).map_err(|error| AppError::Io(error.to_string()))?;
+    fs::write(path, body)?;
+    Ok(())
+}
+
+async fn read_parallel_lanes(repo: &Path) -> CommandResult<Vec<ParallelLane>> {
+    let path = lanes_file(repo).await?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let body = fs::read_to_string(path)?;
+    serde_json::from_str(&body).map_err(|error| AppError::InvalidInput {
+        code: "INVALID_LANE_METADATA",
+        message: format!("Parallel lane metadata is unreadable: {error}"),
+    })
+}
+
+async fn write_parallel_lanes(repo: &Path, lanes: &[ParallelLane]) -> CommandResult<()> {
+    let path = lanes_file(repo).await?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_vec_pretty(lanes).map_err(|error| AppError::Io(error.to_string()))?;
+    fs::write(path, body)?;
+    Ok(())
+}
+
+async fn read_active_operation(repo: &Path) -> CommandResult<Option<GitWorkflowOperation>> {
+    let path = active_operation_file(repo).await?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let body = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&body).ok())
+}
+
+async fn write_active_operation(repo: &Path, operation: &GitWorkflowOperation) -> CommandResult<()> {
+    let path = active_operation_file(repo).await?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_vec_pretty(operation).map_err(|error| AppError::Io(error.to_string()))?;
+    fs::write(path, body)?;
+    Ok(())
+}
+
+async fn clear_active_operation(repo: &Path) -> CommandResult<()> {
+    let path = active_operation_file(repo).await?;
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+async fn list_worktrees(repo: &Path) -> CommandResult<Vec<Worktree>> {
+    let output = run_git(
+        Some(repo),
+        vec!["worktree".into(), "list".into(), "--porcelain".into()],
+    )
+    .await
+    .unwrap_or_default();
+    let mut worktrees = Vec::new();
+    let mut path: Option<String> = None;
+    let mut head = String::new();
+    let mut branch: Option<String> = None;
+    let mut locked = false;
+    let mut prunable = false;
+
+    for line in output.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            if let Some(path_value) = path.take() {
+                worktrees.push(Worktree {
+                    path: path_value,
+                    branch: branch.take().map(|value| normalize_ref_display(&value)),
+                    head: head.clone(),
+                    locked,
+                    prunable,
+                });
+            }
+            head.clear();
+            locked = false;
+            prunable = false;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("worktree ") {
+            path = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("HEAD ") {
+            head = value.to_string();
+        } else if let Some(value) = line.strip_prefix("branch ") {
+            branch = Some(value.to_string());
+        } else if line.starts_with("locked") {
+            locked = true;
+        } else if line.starts_with("prunable") {
+            prunable = true;
+        }
+    }
+
+    Ok(worktrees)
+}
+
+async fn enriched_branch_stacks(repo: &Path, branches: &[Branch]) -> Vec<BranchStack> {
+    let Ok(stacks) = read_branch_stacks(repo).await else {
+        return Vec::new();
+    };
+    let branch_map: BTreeMap<String, &Branch> = branches
+        .iter()
+        .map(|branch| (branch.name.clone(), branch))
+        .collect();
+    let mut enriched = Vec::new();
+
+    for mut stack in stacks {
+        let mut stack_status = BranchStackStatus::Clean;
+        for item in &mut stack.items {
+            if let Some(branch) = branch_map.get(&item.branch) {
+                item.head_sha = branch_head_sha(repo, &item.branch).await;
+                item.upstream = branch.upstream.clone();
+                item.status = if branch.behind.unwrap_or(0) > 0 {
+                    BranchStackItemStatus::Behind
+                } else if branch.ahead.unwrap_or(0) > 0 {
+                    BranchStackItemStatus::Ahead
+                } else if branch_ancestor_contains(repo, &item.base_branch, &item.branch).await {
+                    BranchStackItemStatus::Clean
+                } else {
+                    BranchStackItemStatus::NeedsRestack
+                };
+            } else {
+                item.status = BranchStackItemStatus::Missing;
+            }
+            if matches!(
+                item.status,
+                BranchStackItemStatus::NeedsRestack
+                    | BranchStackItemStatus::Behind
+                    | BranchStackItemStatus::Conflicted
+                    | BranchStackItemStatus::Missing
+            ) {
+                stack_status = if matches!(item.status, BranchStackItemStatus::Conflicted) {
+                    BranchStackStatus::Conflicted
+                } else {
+                    BranchStackStatus::NeedsRestack
+                };
+            }
+        }
+        stack.status = stack_status;
+        enriched.push(stack);
+    }
+
+    enriched
+}
+
+async fn branch_head_sha(repo: &Path, branch: &str) -> Option<String> {
+    run_git(
+        Some(repo),
+        vec!["rev-parse".into(), "--verify".into(), branch.to_string()],
+    )
+    .await
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+}
+
+async fn branch_ancestor_contains(repo: &Path, base: &str, branch: &str) -> bool {
+    run_git(
+        Some(repo),
+        vec!["merge-base".into(), "--is-ancestor".into(), base.into(), branch.into()],
+    )
+    .await
+    .is_ok()
+}
+
+async fn git_ref_exists(repo: &Path, reference: &str) -> bool {
+    run_git(
+        Some(repo),
+        vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            reference.to_string(),
+        ],
+    )
+    .await
+    .is_ok()
+}
+
+async fn inspect_branch(repo: &Path, branch_ref: &str) -> CommandResult<BranchInspection> {
+    let normalized_ref = normalize_branch_inspection_ref(branch_ref)?;
+    validate_ref_arg(&normalized_ref, "branch reference")?;
+
+    let status_output = run_git(
+        Some(repo),
+        vec![
+            "status".into(),
+            "--porcelain=v2".into(),
+            "-z".into(),
+            "--branch".into(),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    let (branch_status, _changes, _conflicts) = parse_status(&status_output);
+    let branches = parse_branches(
+        &run_git(
+            Some(repo),
+            vec![
+                "branch".into(),
+                "--all".into(),
+                "--format=%(refname:short)%1f%(refname)%1f%(upstream:short)%1f%(HEAD)".into(),
+            ],
+        )
+        .await
+        .unwrap_or_default(),
+        branch_status.ahead,
+        branch_status.behind,
+    );
+
+    let branch = branches
+        .iter()
+        .find(|branch| branch_matches_ref(branch, &normalized_ref))
+        .cloned()
+        .or(fallback_branch_for_ref(repo, &normalized_ref).await);
+    let Some(branch) = branch else {
+        return invalid("INVALID_REF", "Branch or ref could not be found.");
+    };
+
+    let kind = branch_inspection_kind(&branch, &normalized_ref);
+    let target_ref = preferred_branch_ref(&branch, &normalized_ref);
+    let upstream = branch.upstream.clone();
+    let default_branch = default_branch_ref(repo).await;
+    let head_sha = branch_head_sha(repo, &target_ref).await;
+    let recent_commits = branch_recent_commits(repo, &target_ref).await.unwrap_or_default();
+    let last_commit = recent_commits.first().cloned();
+    let ahead_behind_upstream = if let Some(upstream_ref) = upstream.as_deref() {
+        ahead_behind(repo, upstream_ref, &target_ref).await
+    } else {
+        None
+    };
+    let ahead_behind_default = if let Some(default_ref) = default_branch
+        .as_deref()
+        .filter(|default_ref| !same_ref_name(default_ref, &target_ref))
+    {
+        ahead_behind(repo, default_ref, &target_ref).await
+    } else {
+        None
+    };
+    let status = branch_inspection_status(ahead_behind_upstream.as_ref(), upstream.as_deref());
+    let base_ref = upstream
+        .clone()
+        .or(default_branch.clone())
+        .filter(|base| !same_ref_name(base, &target_ref));
+    let diff_summary = if let Some(base) = base_ref.as_deref() {
+        branch_diff_summary(repo, base, &target_ref).await
+    } else {
+        None
+    };
+
+    Ok(BranchInspection {
+        branch,
+        kind,
+        upstream,
+        default_branch,
+        base_ref,
+        head_sha,
+        last_commit,
+        ahead_behind_upstream,
+        ahead_behind_default,
+        status,
+        recent_commits,
+        diff_summary,
+    })
+}
+
+fn normalize_branch_inspection_ref(value: &str) -> CommandResult<String> {
+    let trimmed = value.trim();
+    let normalized = trimmed
+        .strip_prefix("HEAD -> ")
+        .or_else(|| trimmed.strip_prefix("tag: "))
+        .unwrap_or(trimmed)
+        .trim()
+        .to_string();
+    if normalized.is_empty() {
+        return invalid("INVALID_REF", "Branch reference is required.");
+    }
+    Ok(normalized)
+}
+
+fn branch_matches_ref(branch: &Branch, value: &str) -> bool {
+    branch.name == value
+        || branch.full_ref == value
+        || normalize_ref_display(&branch.full_ref) == value
+        || branch
+            .full_ref
+            .strip_prefix("refs/remotes/")
+            .is_some_and(|remote_ref| remote_ref == value)
+}
+
+async fn fallback_branch_for_ref(repo: &Path, value: &str) -> Option<Branch> {
+    let full_ref = if value.starts_with("refs/") {
+        if !git_ref_exists(repo, value).await {
+            return None;
+        }
+        value.to_string()
+    } else if git_ref_exists(repo, &format!("refs/tags/{value}")).await {
+        format!("refs/tags/{value}")
+    } else if git_ref_exists(repo, &format!("refs/heads/{value}")).await {
+        format!("refs/heads/{value}")
+    } else if git_ref_exists(repo, &format!("refs/remotes/{value}")).await {
+        format!("refs/remotes/{value}")
+    } else if git_ref_exists(repo, value).await {
+        value.to_string()
+    } else {
+        return None;
+    };
+
+    Some(Branch {
+        name: normalize_ref_display(&full_ref).replace("refs/tags/", ""),
+        full_ref,
+        upstream: None,
+        ahead: None,
+        behind: None,
+        is_current: false,
+        is_protected: false,
+    })
+}
+
+fn branch_inspection_kind(branch: &Branch, requested_ref: &str) -> BranchInspectionKind {
+    if branch.full_ref.starts_with("refs/heads/") {
+        BranchInspectionKind::Local
+    } else if branch.full_ref.starts_with("refs/remotes/") {
+        BranchInspectionKind::Remote
+    } else if branch.full_ref.starts_with("refs/tags/") || requested_ref.starts_with("refs/tags/") {
+        BranchInspectionKind::Tag
+    } else {
+        BranchInspectionKind::Unknown
+    }
+}
+
+fn preferred_branch_ref(branch: &Branch, requested_ref: &str) -> String {
+    if branch.full_ref.is_empty() {
+        requested_ref.to_string()
+    } else {
+        branch.full_ref.clone()
+    }
+}
+
+fn same_ref_name(left: &str, right: &str) -> bool {
+    left == right || normalize_ref_display(left) == normalize_ref_display(right)
+}
+
+async fn ahead_behind(repo: &Path, base: &str, target: &str) -> Option<AheadBehind> {
+    let output = run_git(
+        Some(repo),
+        vec![
+            "rev-list".into(),
+            "--left-right".into(),
+            "--count".into(),
+            format!("{base}...{target}"),
+        ],
+    )
+    .await
+    .ok()?;
+    let mut parts = output.split_whitespace();
+    let behind = parts.next()?.parse().ok()?;
+    let ahead = parts.next()?.parse().ok()?;
+    Some(AheadBehind { ahead, behind })
+}
+
+fn branch_inspection_status(
+    upstream_counts: Option<&AheadBehind>,
+    upstream: Option<&str>,
+) -> BranchInspectionStatus {
+    if upstream.is_none() {
+        return BranchInspectionStatus::NoUpstream;
+    }
+    match upstream_counts {
+        Some(counts) if counts.ahead > 0 && counts.behind > 0 => BranchInspectionStatus::Diverged,
+        Some(counts) if counts.ahead > 0 => BranchInspectionStatus::Ahead,
+        Some(counts) if counts.behind > 0 => BranchInspectionStatus::Behind,
+        Some(_) => BranchInspectionStatus::UpToDate,
+        None => BranchInspectionStatus::Unknown,
+    }
+}
+
+async fn branch_recent_commits(repo: &Path, branch_ref: &str) -> CommandResult<Vec<Commit>> {
+    let output = run_git(
+        Some(repo),
+        vec![
+            "log".into(),
+            "-n".into(),
+            "5".into(),
+            "--date=iso-strict".into(),
+            "--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1e".into(),
+            branch_ref.to_string(),
+        ],
+    )
+    .await?;
+    Ok(parse_commits(&output))
+}
+
+async fn default_branch_ref(repo: &Path) -> Option<String> {
+    if let Ok(output) = run_git(
+        Some(repo),
+        vec![
+            "symbolic-ref".into(),
+            "--quiet".into(),
+            "--short".into(),
+            "refs/remotes/origin/HEAD".into(),
+        ],
+    )
+    .await
+    {
+        let value = output.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+
+    for candidate in ["origin/main", "origin/master", "main", "master", "trunk", "develop"] {
+        if git_ref_exists(repo, candidate).await {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+async fn branch_diff_summary(repo: &Path, base: &str, target: &str) -> Option<BranchDiffSummary> {
+    let range = format!("{base}...{target}");
+    let files = parse_commit_files(
+        &run_git(
+            Some(repo),
+            vec![
+                "diff".into(),
+                "--name-status".into(),
+                "-z".into(),
+                "--find-renames".into(),
+                range.clone(),
+            ],
+        )
+        .await
+        .ok()?,
+    );
+    let (additions, deletions) = parse_shortstat(
+        &run_git(Some(repo), vec!["diff".into(), "--shortstat".into(), range])
+            .await
+            .unwrap_or_default(),
+    );
+    let file_count = files.len();
+    Some(BranchDiffSummary {
+        base_ref: base.to_string(),
+        file_count,
+        additions,
+        deletions,
+        files: files.into_iter().take(50).collect(),
+    })
+}
+
+fn parse_shortstat(raw: &str) -> (Option<i32>, Option<i32>) {
+    let mut additions = None;
+    let mut deletions = None;
+    let mut previous_number = None;
+
+    for token in raw.split(|ch: char| ch.is_whitespace() || ch == ',') {
+        if token.is_empty() {
+            continue;
+        }
+        if let Ok(value) = token.parse::<i32>() {
+            previous_number = Some(value);
+            continue;
+        }
+        if token.starts_with("insertion") {
+            additions = previous_number;
+        } else if token.starts_with("deletion") {
+            deletions = previous_number;
+        }
+    }
+
+    (additions, deletions)
+}
+
+fn normalize_ref_display(value: &str) -> String {
+    value
+        .replace("refs/heads/", "")
+        .replace("refs/remotes/", "")
+}
+
+fn metadata_id(prefix: &str, label: &str) -> String {
+    let slug = label
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("-");
+    format!("{prefix}-{}-{}", now_millis(), if slug.is_empty() { "item" } else { &slug })
+}
+
+fn validate_metadata_id(value: &str, label: &str) -> CommandResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('-')
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.chars().any(|ch| ch.is_control())
+    {
+        return invalid("INVALID_ID", &format!("{label} is invalid."));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn stack_resequence_items(stack: &mut BranchStack) {
+    stack.items.sort_by_key(|item| item.order);
+    let mut base = stack.trunk.clone();
+    for (index, item) in stack.items.iter_mut().enumerate() {
+        item.order = index;
+        item.base_branch = base.clone();
+        base = item.branch.clone();
+    }
+    stack.updated_at = now_millis().to_string();
+}
+
+fn lane_patch_path(dir: &Path, source: ParallelLanePathSource) -> PathBuf {
+    match source {
+        ParallelLanePathSource::Staged => dir.join("staged.patch"),
+        ParallelLanePathSource::Working => dir.join("working.patch"),
+        ParallelLanePathSource::Untracked => dir.join("untracked.patch"),
+    }
+}
+
+fn lane_untracked_root(dir: &Path) -> PathBuf {
+    dir.join("untracked")
+}
+
+fn lane_owns_path(lane: &ParallelLane, path: &str) -> bool {
+    lane.paths.iter().any(|lane_path| lane_path.path == path)
+}
+
+fn find_lane_mut<'a>(lanes: &'a mut [ParallelLane], lane_id: &str) -> CommandResult<&'a mut ParallelLane> {
+    lanes.iter_mut().find(|lane| lane.id == lane_id).ok_or_else(|| AppError::InvalidInput {
+        code: "LANE_NOT_FOUND",
+        message: "Parallel lane could not be found.".to_string(),
+    })
+}
+
+fn find_stack_mut<'a>(stacks: &'a mut [BranchStack], stack_id: &str) -> CommandResult<&'a mut BranchStack> {
+    stacks.iter_mut().find(|stack| stack.id == stack_id).ok_or_else(|| AppError::InvalidInput {
+        code: "STACK_NOT_FOUND",
+        message: "Branch stack could not be found.".to_string(),
+    })
+}
+
+fn git_args_with_paths(prefix: &[&str], paths: &[String]) -> Vec<String> {
+    let mut args = prefix.iter().map(|value| value.to_string()).collect::<Vec<_>>();
+    args.push("--".to_string());
+    args.extend(paths.iter().cloned());
+    args
+}
+
+async fn capture_paths_into_lane(repo: &Path, lane: &mut ParallelLane, paths: &[String]) -> CommandResult<()> {
+    let safe_paths = validate_file_paths(paths)?;
+    let snapshot = build_snapshot(repo, None).await?;
+    let mut staged_paths = Vec::new();
+    let mut working_paths = Vec::new();
+    let mut untracked_paths = Vec::new();
+    let mut lane_paths = Vec::new();
+
+    for path in safe_paths {
+        if lane_owns_path(lane, &path) {
+            continue;
+        }
+        let Some(change) = snapshot.changes.iter().find(|change| change.path == path) else {
+            return invalid("LANE_PATH_UNCHANGED", "Only changed files can be assigned to a lane.");
+        };
+        if change.staged && change.unstaged {
+            return invalid(
+                "LANE_MIXED_FILE",
+                "Files with both staged and unstaged edits must be split manually before assigning to a lane.",
+            );
+        }
+        let source = if change.status == FileStatus::Untracked {
+            untracked_paths.push(path.clone());
+            ParallelLanePathSource::Untracked
+        } else if change.staged {
+            staged_paths.push(path.clone());
+            ParallelLanePathSource::Staged
+        } else {
+            working_paths.push(path.clone());
+            ParallelLanePathSource::Working
+        };
+        lane_paths.push(ParallelLanePath {
+            path,
+            old_path: change.old_path.clone(),
+            status: change.status,
+            source,
+        });
+    }
+
+    if lane_paths.is_empty() {
+        return invalid("LANE_EMPTY", "Select at least one changed file for the lane.");
+    }
+
+    let dir = lane_dir(repo, &lane.id).await?;
+    fs::create_dir_all(&dir)?;
+
+    if !staged_paths.is_empty() {
+        let patch = run_git(Some(repo), git_args_with_paths(&["diff", "--cached", "--binary"], &staged_paths)).await?;
+        let patch_path = lane_patch_path(&dir, ParallelLanePathSource::Staged);
+        fs::write(&patch_path, patch)?;
+        run_git(
+            Some(repo),
+            vec![
+                "apply".into(),
+                "--check".into(),
+                "-R".into(),
+                "--index".into(),
+                patch_path.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+
+    if !working_paths.is_empty() {
+        let patch = run_git(Some(repo), git_args_with_paths(&["diff", "--binary"], &working_paths)).await?;
+        let patch_path = lane_patch_path(&dir, ParallelLanePathSource::Working);
+        fs::write(&patch_path, patch)?;
+        run_git(
+            Some(repo),
+            vec![
+                "apply".into(),
+                "--check".into(),
+                "-R".into(),
+                patch_path.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+
+    let untracked_root = lane_untracked_root(&dir);
+    for path in &untracked_paths {
+        let source = repo.join(path);
+        if !source.is_file() {
+            return invalid("LANE_UNTRACKED_UNSUPPORTED", "Only untracked files can be assigned in v1; directories are not supported yet.");
+        }
+        let destination = untracked_root.join(path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&source, destination)?;
+    }
+
+    if !staged_paths.is_empty() {
+        let patch_path = lane_patch_path(&dir, ParallelLanePathSource::Staged);
+        run_git(
+            Some(repo),
+            vec![
+                "apply".into(),
+                "-R".into(),
+                "--index".into(),
+                patch_path.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+    if !working_paths.is_empty() {
+        let patch_path = lane_patch_path(&dir, ParallelLanePathSource::Working);
+        run_git(
+            Some(repo),
+            vec![
+                "apply".into(),
+                "-R".into(),
+                patch_path.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+    for path in &untracked_paths {
+        fs::remove_file(repo.join(path))?;
+    }
+
+    lane.paths.extend(lane_paths);
+    lane.applied = false;
+    lane.status = ParallelLaneStatus::Clean;
+    lane.updated_at = now_millis().to_string();
+    Ok(())
+}
+
+async fn apply_lane_internal(repo: &Path, lane: &mut ParallelLane) -> CommandResult<()> {
+    if lane.applied {
+        return Ok(());
+    }
+    let dir = lane_dir(repo, &lane.id).await?;
+    let staged_patch = lane_patch_path(&dir, ParallelLanePathSource::Staged);
+    let working_patch = lane_patch_path(&dir, ParallelLanePathSource::Working);
+
+    if staged_patch.exists() {
+        run_git(
+            Some(repo),
+            vec![
+                "apply".into(),
+                "--check".into(),
+                "--index".into(),
+                staged_patch.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+    if working_patch.exists() {
+        run_git(
+            Some(repo),
+            vec![
+                "apply".into(),
+                "--check".into(),
+                working_patch.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+    for path in lane.paths.iter().filter(|path| path.source == ParallelLanePathSource::Untracked) {
+        if repo.join(&path.path).exists() {
+            return invalid("LANE_UNTRACKED_COLLISION", "Applying this lane would overwrite an untracked file.");
+        }
+    }
+
+    if staged_patch.exists() {
+        run_git(
+            Some(repo),
+            vec![
+                "apply".into(),
+                "--index".into(),
+                staged_patch.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+    if working_patch.exists() {
+        run_git(
+            Some(repo),
+            vec!["apply".into(), working_patch.to_string_lossy().to_string()],
+        )
+        .await?;
+    }
+    for path in lane.paths.iter().filter(|path| path.source == ParallelLanePathSource::Untracked) {
+        let source = lane_untracked_root(&dir).join(&path.path);
+        let destination = repo.join(&path.path);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source, destination)?;
+    }
+
+    lane.applied = true;
+    lane.status = ParallelLaneStatus::Dirty;
+    lane.updated_at = now_millis().to_string();
+    Ok(())
+}
+
+async fn unapply_lane_internal(repo: &Path, lane: &mut ParallelLane) -> CommandResult<()> {
+    if !lane.applied {
+        return Ok(());
+    }
+    let dir = lane_dir(repo, &lane.id).await?;
+    let staged_patch = lane_patch_path(&dir, ParallelLanePathSource::Staged);
+    let working_patch = lane_patch_path(&dir, ParallelLanePathSource::Working);
+
+    if staged_patch.exists() {
+        run_git(
+            Some(repo),
+            vec![
+                "apply".into(),
+                "--check".into(),
+                "-R".into(),
+                "--index".into(),
+                staged_patch.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+    if working_patch.exists() {
+        run_git(
+            Some(repo),
+            vec![
+                "apply".into(),
+                "--check".into(),
+                "-R".into(),
+                working_patch.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+    for path in lane.paths.iter().filter(|path| path.source == ParallelLanePathSource::Untracked) {
+        let source = lane_untracked_root(&dir).join(&path.path);
+        let destination = repo.join(&path.path);
+        if destination.exists() {
+            let expected = fs::read(&source).unwrap_or_default();
+            let actual = fs::read(&destination).unwrap_or_default();
+            if expected != actual {
+                return invalid("LANE_UNTRACKED_MODIFIED", "Untracked lane file changed after apply; commit it or restore manually before unapplying.");
+            }
+        }
+    }
+
+    if staged_patch.exists() {
+        run_git(
+            Some(repo),
+            vec![
+                "apply".into(),
+                "-R".into(),
+                "--index".into(),
+                staged_patch.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+    if working_patch.exists() {
+        run_git(
+            Some(repo),
+            vec![
+                "apply".into(),
+                "-R".into(),
+                working_patch.to_string_lossy().to_string(),
+            ],
+        )
+        .await?;
+    }
+    for path in lane.paths.iter().filter(|path| path.source == ParallelLanePathSource::Untracked) {
+        let destination = repo.join(&path.path);
+        if destination.exists() {
+            fs::remove_file(destination)?;
+        }
+    }
+
+    lane.applied = false;
+    lane.status = ParallelLaneStatus::Clean;
+    lane.updated_at = now_millis().to_string();
+    Ok(())
 }
 
 fn prune_undo_snapshots(snapshot_dir: &Path, keep: usize) {
@@ -2813,6 +4650,839 @@ fn read_azure_devops_pat() -> CommandResult<Option<String>> {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AzureProfileResponse {
+    id: String,
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AzureListResponse<T> {
+    value: Vec<T>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AzureAccountWire {
+    account_id: Option<String>,
+    account_name: String,
+    account_uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AzureProjectWire {
+    id: String,
+    name: String,
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AzureRepositoryWire {
+    id: String,
+    name: String,
+    remote_url: Option<String>,
+    web_url: Option<String>,
+    default_branch: Option<String>,
+    project: Option<AzureRepositoryProjectWire>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AzureRepositoryProjectWire {
+    id: String,
+    name: String,
+    url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AzureRemoteParts {
+    org: String,
+    project: Option<String>,
+    repo: String,
+}
+
+async fn list_azure_devops_repositories(local_paths: Vec<String>) -> CommandResult<ProviderRepoCatalog> {
+    let pat = read_azure_devops_pat()?.ok_or_else(|| AppError::InvalidInput {
+        code: "AZURE_DEVOPS_TOKEN_MISSING",
+        message:
+            "Add an Azure DevOps Personal Access Token in Preferences > Integrations before listing Azure DevOps repositories."
+                .to_string(),
+    })?;
+    let client = reqwest::Client::new();
+    let local_refs = local_repository_refs(local_paths).await;
+
+    let mut accounts = Vec::new();
+    let mut projects = Vec::new();
+    let mut repositories = Vec::new();
+
+    let account_discovery = discover_azure_devops_accounts(&client, &pat).await;
+    if let Ok(azure_accounts) = account_discovery {
+        let mut fallback_error = None;
+        for account in azure_accounts {
+            let account_name = account.account_name.clone();
+            if let Err(error) = append_azure_account_repositories(
+                &client,
+                &pat,
+                account,
+                &local_refs,
+                &mut accounts,
+                &mut projects,
+                &mut repositories,
+            )
+            .await
+            {
+                fallback_error = Some(error);
+                if let Err(error) = append_azure_org_repositories(
+                    &client,
+                    &pat,
+                    &account_name,
+                    &local_refs,
+                    &mut accounts,
+                    &mut projects,
+                    &mut repositories,
+                )
+                .await
+                {
+                    fallback_error = Some(error);
+                }
+            }
+        }
+        if repositories.is_empty() {
+            if let Some(error) = fallback_error {
+                return Err(error);
+            }
+        }
+    } else {
+        let org_hints = azure_org_hints_from_local_refs(&local_refs);
+        if org_hints.is_empty() {
+            return Err(azure_discovery_unavailable(account_discovery.err()));
+        }
+        let mut fallback_error = None;
+        for org in org_hints {
+            if let Err(error) = append_azure_org_repositories(
+                &client,
+                &pat,
+                &org,
+                &local_refs,
+                &mut accounts,
+                &mut projects,
+                &mut repositories,
+            )
+            .await
+            {
+                fallback_error = Some(error);
+            }
+        }
+        if repositories.is_empty() {
+            return Err(fallback_error.unwrap_or_else(|| azure_discovery_unavailable(None)));
+        }
+    }
+
+    repositories.sort_by(|left, right| {
+        left.account_name
+            .cmp(&right.account_name)
+            .then_with(|| left.project_name.cmp(&right.project_name))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    Ok(ProviderRepoCatalog {
+        provider: GitProvider::AzureDevops,
+        accounts,
+        projects,
+        repositories,
+        refreshed_at: now_millis().to_string(),
+    })
+}
+
+async fn discover_azure_devops_accounts(
+    client: &reqwest::Client,
+    pat: &str,
+) -> CommandResult<Vec<AzureAccountWire>> {
+    let profile: AzureProfileResponse = azure_get_json(
+        &client,
+        "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1",
+        &pat,
+    )
+    .await?;
+    let _profile_name = profile.display_name.as_deref().unwrap_or("Azure DevOps");
+    let accounts_url = format!(
+        "https://app.vssps.visualstudio.com/_apis/accounts?memberId={}&api-version=7.1",
+        url_query_value(&profile.id)
+    );
+    azure_get_paged_values(client, &accounts_url, pat).await
+}
+
+async fn append_azure_account_repositories(
+    client: &reqwest::Client,
+    pat: &str,
+    account: AzureAccountWire,
+    local_refs: &[LocalRepositoryRef],
+    accounts: &mut Vec<ProviderAccount>,
+    projects: &mut Vec<ProviderProject>,
+    repositories: &mut Vec<ProviderRepository>,
+) -> CommandResult<()> {
+    let account_name = account.account_name.trim().to_string();
+    if account_name.is_empty() {
+        return Ok(());
+    }
+    let account_id = account
+        .account_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| account_name.clone());
+    push_provider_account(accounts, &account_id, &account_name, account.account_uri.clone());
+
+    let projects_url = format!(
+        "https://dev.azure.com/{}/_apis/projects?api-version=7.1&$top=1000",
+        url_path_segment(&account_name)
+    );
+    let azure_projects: Vec<AzureProjectWire> =
+        azure_get_paged_values(client, &projects_url, pat).await?;
+
+    for project in azure_projects {
+        let project_name = project.name.trim().to_string();
+        if project_name.is_empty() {
+            continue;
+        }
+        push_provider_project(projects, &account_id, &project.id, &project_name, project.url.clone());
+        let repos_url = format!(
+            "https://dev.azure.com/{}/{}/_apis/git/repositories?api-version=7.1",
+            url_path_segment(&account_name),
+            url_path_segment(&project_name)
+        );
+        let azure_repos: Vec<AzureRepositoryWire> =
+            azure_get_paged_values(client, &repos_url, pat).await?;
+        for repo in azure_repos {
+            push_azure_provider_repository(
+                repositories,
+                &account_id,
+                &account_name,
+                Some(&project.id),
+                Some(&project_name),
+                repo,
+                local_refs,
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn append_azure_org_repositories(
+    client: &reqwest::Client,
+    pat: &str,
+    org: &str,
+    local_refs: &[LocalRepositoryRef],
+    accounts: &mut Vec<ProviderAccount>,
+    projects: &mut Vec<ProviderProject>,
+    repositories: &mut Vec<ProviderRepository>,
+) -> CommandResult<()> {
+    let account_id = org.to_string();
+    push_provider_account(
+        accounts,
+        &account_id,
+        org,
+        Some(format!("https://dev.azure.com/{}", url_path_segment(org))),
+    );
+    let repos_url = format!(
+        "https://dev.azure.com/{}/_apis/git/repositories?api-version=7.1&$top=1000",
+        url_path_segment(org)
+    );
+    let azure_repos: Vec<AzureRepositoryWire> =
+        azure_get_paged_values(client, &repos_url, pat).await?;
+    for repo in azure_repos {
+        let project_id = repo.project.as_ref().map(|project| project.id.clone());
+        let project_name = repo.project.as_ref().map(|project| project.name.clone());
+        if let Some(project) = &repo.project {
+            push_provider_project(
+                projects,
+                &account_id,
+                &project.id,
+                &project.name,
+                project.url.clone(),
+            );
+        }
+        push_azure_provider_repository(
+            repositories,
+            &account_id,
+            org,
+            project_id.as_deref(),
+            project_name.as_deref(),
+            repo,
+            local_refs,
+        );
+    }
+    Ok(())
+}
+
+fn push_provider_account(
+    accounts: &mut Vec<ProviderAccount>,
+    account_id: &str,
+    account_name: &str,
+    url: Option<String>,
+) {
+    if accounts
+        .iter()
+        .any(|account| account.id == account_id || account.name.eq_ignore_ascii_case(account_name))
+    {
+        return;
+    }
+    accounts.push(ProviderAccount {
+        id: account_id.to_string(),
+        provider: GitProvider::AzureDevops,
+        name: account_name.to_string(),
+        display_name: Some(account_name.to_string()),
+        url,
+    });
+}
+
+fn push_provider_project(
+    projects: &mut Vec<ProviderProject>,
+    account_id: &str,
+    project_id: &str,
+    project_name: &str,
+    url: Option<String>,
+) {
+    if projects
+        .iter()
+        .any(|project| project.account_id == account_id && project.id == project_id)
+    {
+        return;
+    }
+    projects.push(ProviderProject {
+        id: project_id.to_string(),
+        provider: GitProvider::AzureDevops,
+        account_id: account_id.to_string(),
+        name: project_name.to_string(),
+        url,
+    });
+}
+
+fn push_azure_provider_repository(
+    repositories: &mut Vec<ProviderRepository>,
+    account_id: &str,
+    account_name: &str,
+    project_id: Option<&str>,
+    project_name: Option<&str>,
+    repo: AzureRepositoryWire,
+    local_refs: &[LocalRepositoryRef],
+) {
+    let project_name_value = project_name.map(ToString::to_string);
+    let repo_id = repo_provider_id(
+        GitProvider::AzureDevops,
+        account_name,
+        project_name.unwrap_or_default(),
+        &repo.name,
+        &repo.id,
+    );
+    if repositories.iter().any(|existing| existing.id == repo_id) {
+        return;
+    }
+    let clone_url = repo.remote_url.as_ref().map(|url| ProviderCloneUrl {
+        kind: provider_clone_url_kind(url),
+        url: url.clone(),
+        safe_url: redact_secrets(url),
+    });
+    let local_match = repo
+        .remote_url
+        .as_deref()
+        .map(|url| local_match_for_remote(url, local_refs))
+        .unwrap_or_else(|| LocalRepoMatch {
+            status: LocalRepoMatchStatus::NotCloned,
+            path: None,
+            matched_remote: None,
+        });
+    repositories.push(ProviderRepository {
+        id: repo_id,
+        provider: GitProvider::AzureDevops,
+        account_id: account_id.to_string(),
+        account_name: account_name.to_string(),
+        project_id: project_id.map(ToString::to_string),
+        project_name: project_name_value,
+        name: repo.name,
+        default_branch: repo.default_branch.as_deref().map(normalize_default_branch),
+        web_url: repo.web_url,
+        clone_url,
+        local_match,
+    });
+}
+
+fn azure_org_hints_from_local_refs(local_refs: &[LocalRepositoryRef]) -> Vec<String> {
+    let mut orgs = BTreeMap::new();
+    for local_ref in local_refs {
+        for remote in &local_ref.remotes {
+            for url in [remote.fetch_url.as_deref(), remote.push_url.as_deref()] {
+                let Some(url) = url else {
+                    continue;
+                };
+                if let Some(parts) = azure_remote_parts(url) {
+                    orgs.entry(parts.org.to_ascii_lowercase()).or_insert(parts.org);
+                }
+            }
+        }
+    }
+    orgs.into_values().collect()
+}
+
+fn azure_discovery_unavailable(error: Option<AppError>) -> AppError {
+    let detail = error
+        .map(|error| format!("{error:?}"))
+        .unwrap_or_else(|| "No Azure DevOps organization hints were available.".to_string());
+    AppError::ProviderFailed {
+        code: "AZURE_DEVOPS_DISCOVERY_UNAVAILABLE",
+        message: "Azure DevOps account discovery was unavailable for this PAT. OpenGit can still list repos when it can infer an organization from an open, recent, or located Azure DevOps repository.".to_string(),
+        detail,
+    }
+}
+
+async fn azure_get_paged_values<T>(
+    client: &reqwest::Client,
+    base_url: &str,
+    pat: &str,
+) -> CommandResult<Vec<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let mut values = Vec::new();
+    let mut continuation: Option<String> = None;
+    loop {
+        let url = match continuation.as_deref() {
+            Some(token) => append_query_param(base_url, "continuationToken", token),
+            None => base_url.to_string(),
+        };
+        let (page, next): (AzureListResponse<T>, Option<String>) =
+            azure_get_json_with_continuation(client, &url, pat).await?;
+        values.extend(page.value);
+        if next.as_deref().is_none_or(str::is_empty) {
+            break;
+        }
+        continuation = next;
+    }
+    Ok(values)
+}
+
+async fn azure_get_json<T>(client: &reqwest::Client, url: &str, pat: &str) -> CommandResult<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let (value, _continuation) = azure_get_json_with_continuation(client, url, pat).await?;
+    Ok(value)
+}
+
+async fn azure_get_json_with_continuation<T>(
+    client: &reqwest::Client,
+    url: &str,
+    pat: &str,
+) -> CommandResult<(T, Option<String>)>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let response = client
+        .get(url)
+        .basic_auth("", Some(pat))
+        .send()
+        .await
+        .map_err(|error| AppError::ProviderFailed {
+            code: "PROVIDER_REQUEST_FAILED",
+            message: "Azure DevOps request failed.".to_string(),
+            detail: error.to_string(),
+        })?;
+    let status = response.status();
+    let continuation = response
+        .headers()
+        .get("x-ms-continuationtoken")
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
+    let body = response.text().await.map_err(|error| AppError::ProviderFailed {
+        code: "PROVIDER_REQUEST_FAILED",
+        message: "Azure DevOps response could not be read.".to_string(),
+        detail: error.to_string(),
+    })?;
+
+    if !status.is_success() {
+        return Err(azure_provider_error(status, url, &body));
+    }
+
+    let parsed = serde_json::from_str::<T>(&body).map_err(|error| AppError::ProviderFailed {
+        code: "PROVIDER_RESPONSE_INVALID",
+        message: "Azure DevOps returned a response OpenGit could not parse.".to_string(),
+        detail: format!("{error}: {body}"),
+    })?;
+    Ok((parsed, continuation))
+}
+
+fn azure_provider_error(status: reqwest::StatusCode, url: &str, body: &str) -> AppError {
+    let code = if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        "AZURE_DEVOPS_AUTH_FAILED"
+    } else {
+        "PROVIDER_REQUEST_FAILED"
+    };
+    let message = if code == "AZURE_DEVOPS_AUTH_FAILED" {
+        if url.contains("app.vssps.visualstudio.com") {
+            "Azure DevOps account discovery is unavailable for this PAT. OpenGit will try Azure organizations from local remotes when possible.".to_string()
+        } else {
+            "Azure DevOps denied this request. The saved PAT may still be valid, but this organization or API needs matching Code read access.".to_string()
+        }
+    } else {
+        format!("Azure DevOps returned HTTP {status}.")
+    };
+    AppError::ProviderFailed {
+        code,
+        message,
+        detail: format!("{url}\n{body}"),
+    }
+}
+
+async fn local_repository_refs(local_paths: Vec<String>) -> Vec<LocalRepositoryRef> {
+    let mut refs = Vec::new();
+    let mut seen = Vec::new();
+    for path in local_paths {
+        let trimmed = path.trim();
+        if trimmed.is_empty() || seen.iter().any(|item: &String| item == trimmed) {
+            continue;
+        }
+        seen.push(trimmed.to_string());
+        refs.push(local_repository_ref(trimmed).await);
+    }
+    refs
+}
+
+async fn local_repository_ref(path: &str) -> LocalRepositoryRef {
+    let input = PathBuf::from(path);
+    if !input.exists() {
+        return LocalRepositoryRef {
+            path: path.to_string(),
+            exists: false,
+            is_repository: false,
+            remotes: Vec::new(),
+        };
+    }
+
+    let Ok(canonical) = fs::canonicalize(&input) else {
+        return LocalRepositoryRef {
+            path: path.to_string(),
+            exists: true,
+            is_repository: false,
+            remotes: Vec::new(),
+        };
+    };
+
+    let root = match run_git(
+        None,
+        vec![
+            "-C".into(),
+            canonical.to_string_lossy().to_string(),
+            "rev-parse".into(),
+            "--show-toplevel".into(),
+        ],
+    )
+    .await
+    {
+        Ok(value) => PathBuf::from(value.trim()),
+        Err(_) => {
+            return LocalRepositoryRef {
+                path: canonical.to_string_lossy().to_string(),
+                exists: true,
+                is_repository: false,
+                remotes: Vec::new(),
+            };
+        }
+    };
+    let remotes = parse_remotes(
+        &run_git(Some(&root), vec!["remote".into(), "-v".into()])
+            .await
+            .unwrap_or_default(),
+    );
+    LocalRepositoryRef {
+        path: root.to_string_lossy().to_string(),
+        exists: true,
+        is_repository: true,
+        remotes,
+    }
+}
+
+fn local_match_for_remote(remote_url: &str, refs: &[LocalRepositoryRef]) -> LocalRepoMatch {
+    let normalized_remote = normalize_git_remote_url(remote_url);
+    for local_ref in refs {
+        if !local_ref.exists || !local_ref.is_repository {
+            continue;
+        }
+        for remote in &local_ref.remotes {
+            for candidate in [remote.fetch_url.as_deref(), remote.push_url.as_deref()] {
+                let Some(candidate) = candidate else {
+                    continue;
+                };
+                if normalize_git_remote_url(candidate) == normalized_remote {
+                    return LocalRepoMatch {
+                        status: LocalRepoMatchStatus::Cloned,
+                        path: Some(local_ref.path.clone()),
+                        matched_remote: Some(redact_secrets(candidate)),
+                    };
+                }
+            }
+        }
+    }
+    LocalRepoMatch {
+        status: LocalRepoMatchStatus::NotCloned,
+        path: None,
+        matched_remote: None,
+    }
+}
+
+fn provider_clone_url_kind(url: &str) -> ProviderCloneUrlKind {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        ProviderCloneUrlKind::Https
+    } else if lower.starts_with("ssh://") || lower.starts_with("git@") {
+        ProviderCloneUrlKind::Ssh
+    } else {
+        ProviderCloneUrlKind::Unknown
+    }
+}
+
+fn repo_provider_id(
+    provider: GitProvider,
+    account_name: &str,
+    project_name: &str,
+    repo_name: &str,
+    fallback_id: &str,
+) -> String {
+    let key = format!(
+        "{}:{}:{}",
+        account_name.trim().to_ascii_lowercase(),
+        project_name.trim().to_ascii_lowercase(),
+        repo_name.trim().to_ascii_lowercase()
+    );
+    let prefix = match provider {
+        GitProvider::AzureDevops => "azure-devops",
+        GitProvider::Github => "github",
+        GitProvider::Gitlab => "gitlab",
+        GitProvider::Bitbucket => "bitbucket",
+        GitProvider::Unknown => "unknown",
+    };
+    if key.replace(':', "").trim().is_empty() {
+        format!("{prefix}:{fallback_id}")
+    } else {
+        format!("{prefix}:{key}")
+    }
+}
+
+fn normalize_default_branch(value: &str) -> String {
+    value
+        .strip_prefix("refs/heads/")
+        .unwrap_or(value)
+        .trim()
+        .to_string()
+}
+
+fn normalize_git_remote_url(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some(parts) = azure_remote_parts(trimmed) {
+        if let Some(project) = parts.project {
+            return azure_repo_key(&parts.org, &project, &parts.repo);
+        }
+    }
+    let without_credentials = strip_url_credentials(trimmed);
+    if let Some((scheme, rest)) = without_credentials.split_once("://") {
+        let mut authority_and_path = rest.splitn(2, '/');
+        let authority = authority_and_path.next().unwrap_or_default();
+        let path = authority_and_path.next().unwrap_or_default();
+        let host = authority
+            .split('@')
+            .last()
+            .unwrap_or(authority)
+            .split(':')
+            .next()
+            .unwrap_or(authority)
+            .to_ascii_lowercase();
+        let parts: Vec<String> = path
+            .split('/')
+            .map(percent_decode)
+            .filter(|part| !part.trim().is_empty())
+            .collect();
+        if host == "dev.azure.com" && parts.len() >= 4 && parts[2].eq_ignore_ascii_case("_git")
+        {
+            return azure_repo_key(&parts[0], &parts[1], &parts[3]);
+        }
+        if host.ends_with(".visualstudio.com")
+            && parts.len() >= 3
+            && parts[1].eq_ignore_ascii_case("_git")
+        {
+            let org = host.trim_end_matches(".visualstudio.com");
+            return azure_repo_key(org, &parts[0], &parts[2]);
+        }
+        return format!(
+            "{}://{}{}",
+            scheme.to_ascii_lowercase(),
+            host,
+            strip_dot_git(&format!("/{path}")).to_ascii_lowercase()
+        );
+    }
+
+    if let Some((left, right)) = trimmed.split_once(':') {
+        if left.contains('@') && !right.trim().is_empty() {
+            let host = left.split('@').last().unwrap_or(left).to_ascii_lowercase();
+            return format!("ssh://{}/{}", host, strip_dot_git(right).to_ascii_lowercase());
+        }
+    }
+
+    strip_dot_git(trimmed).to_ascii_lowercase()
+}
+
+fn azure_remote_parts(input: &str) -> Option<AzureRemoteParts> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let without_credentials = strip_url_credentials(trimmed);
+    if let Some((_scheme, rest)) = without_credentials.split_once("://") {
+        let mut authority_and_path = rest.splitn(2, '/');
+        let authority = authority_and_path.next().unwrap_or_default();
+        let path = authority_and_path.next().unwrap_or_default();
+        let host = authority
+            .split('@')
+            .last()
+            .unwrap_or(authority)
+            .split(':')
+            .next()
+            .unwrap_or(authority)
+            .to_ascii_lowercase();
+        let parts: Vec<String> = path
+            .split('/')
+            .map(percent_decode)
+            .filter(|part| !part.trim().is_empty())
+            .collect();
+        if host == "dev.azure.com" && parts.len() >= 4 && parts[2].eq_ignore_ascii_case("_git")
+        {
+            return Some(AzureRemoteParts {
+                org: parts[0].clone(),
+                project: Some(parts[1].clone()),
+                repo: strip_dot_git(&parts[3]),
+            });
+        }
+        if host.ends_with(".visualstudio.com")
+            && parts.len() >= 3
+            && parts[1].eq_ignore_ascii_case("_git")
+        {
+            return Some(AzureRemoteParts {
+                org: host.trim_end_matches(".visualstudio.com").to_string(),
+                project: Some(parts[0].clone()),
+                repo: strip_dot_git(&parts[2]),
+            });
+        }
+        if host == "ssh.dev.azure.com" && parts.len() >= 4 && parts[0].eq_ignore_ascii_case("v3")
+        {
+            return Some(AzureRemoteParts {
+                org: parts[1].clone(),
+                project: Some(parts[2].clone()),
+                repo: strip_dot_git(&parts[3]),
+            });
+        }
+    }
+
+    if let Some((left, right)) = trimmed.split_once(':') {
+        if left.to_ascii_lowercase().contains("ssh.dev.azure.com") {
+            let parts: Vec<String> = right
+                .split('/')
+                .map(percent_decode)
+                .filter(|part| !part.trim().is_empty())
+                .collect();
+            if parts.len() >= 4 && parts[0].eq_ignore_ascii_case("v3") {
+                return Some(AzureRemoteParts {
+                    org: parts[1].clone(),
+                    project: Some(parts[2].clone()),
+                    repo: strip_dot_git(&parts[3]),
+                });
+            }
+        }
+    }
+
+    None
+}
+
+fn azure_repo_key(org: &str, project: &str, repo: &str) -> String {
+    format!(
+        "azure-devops:{}/{}/{}",
+        org.trim().to_ascii_lowercase(),
+        project.trim().to_ascii_lowercase(),
+        strip_dot_git(repo).trim().to_ascii_lowercase()
+    )
+}
+
+fn strip_dot_git(value: &str) -> String {
+    value
+        .strip_suffix(".git")
+        .or_else(|| value.strip_suffix(".GIT"))
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn strip_url_credentials(value: &str) -> String {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return value.to_string();
+    };
+    let Some((authority, path)) = rest.split_once('/') else {
+        return value.to_string();
+    };
+    if let Some(at_index) = authority.rfind('@') {
+        return format!("{scheme}://{}{}", &authority[at_index + 1..], format!("/{path}"));
+    }
+    value.to_string()
+}
+
+fn percent_decode(value: &str) -> String {
+    let mut output = String::new();
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(hex) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
+                output.push(hex as char);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(bytes[index] as char);
+        index += 1;
+    }
+    output
+}
+
+fn url_path_segment(value: &str) -> String {
+    percent_encode(value, "-._~")
+}
+
+fn url_query_value(value: &str) -> String {
+    percent_encode(value, "-._~")
+}
+
+fn percent_encode(value: &str, safe: &str) -> String {
+    let mut output = String::new();
+    for byte in value.bytes() {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || safe.contains(ch) {
+            output.push(ch);
+        } else {
+            output.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    output
+}
+
+fn append_query_param(url: &str, key: &str, value: &str) -> String {
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}{key}={}", url_query_value(value))
+}
+
 fn map_keyring_error(error: KeyringError) -> AppError {
     AppError::SecureStorage(error.to_string())
 }
@@ -3548,6 +6218,8 @@ pub fn run() {
             azure_devops_status,
             azure_devops_save_pat,
             azure_devops_clear_pat,
+            provider_accounts_status,
+            provider_repos_list,
             ai_commit_message_generate,
             ai_branch_name_generate,
             ai_pr_description_generate,
@@ -3556,6 +6228,24 @@ pub fn run() {
             git_branch_checkout,
             git_branch_delete,
             git_branch_rename,
+            git_branch_inspect,
+            git_stack_list,
+            git_stack_create,
+            git_stack_create_child,
+            git_stack_add_branch,
+            git_stack_reorder,
+            git_stack_remove_branch,
+            git_stack_restack,
+            git_stack_sync_trunk,
+            git_stack_push,
+            git_lane_list,
+            git_lane_create,
+            git_lane_assign_paths,
+            git_lane_apply,
+            git_lane_unapply,
+            git_lane_commit,
+            git_lane_discard,
+            git_lane_materialize_branch,
             git_fetch,
             git_pull,
             git_pull_fast_forward,
@@ -3618,6 +6308,64 @@ mod tests {
 
         assert_eq!(target.scope, "https://org.visualstudio.com/");
         assert_eq!(target.username, "opengit");
+    }
+
+    #[test]
+    fn normalizes_azure_devops_remote_url_variants() {
+        assert_eq!(
+            normalize_git_remote_url("https://dev.azure.com/org/project/_git/repo"),
+            "azure-devops:org/project/repo"
+        );
+        assert_eq!(
+            normalize_git_remote_url("https://org@dev.azure.com/org/project/_git/repo.git"),
+            "azure-devops:org/project/repo"
+        );
+        assert_eq!(
+            normalize_git_remote_url("https://org.visualstudio.com/project/_git/repo"),
+            "azure-devops:org/project/repo"
+        );
+        assert_eq!(
+            normalize_git_remote_url("https://DEV.AZURE.com/Org/Project/_git/Repo"),
+            "azure-devops:org/project/repo"
+        );
+        assert_eq!(
+            normalize_git_remote_url("git@ssh.dev.azure.com:v3/Org/Project/Repo.git"),
+            "azure-devops:org/project/repo"
+        );
+    }
+
+    #[test]
+    fn derives_azure_org_hints_from_local_remotes() {
+        let refs = vec![LocalRepositoryRef {
+            path: "/tmp/repo".to_string(),
+            exists: true,
+            is_repository: true,
+            remotes: vec![
+                Remote {
+                    name: "origin".to_string(),
+                    fetch_url: Some("https://dev.azure.com/Hubley/hubley%20spfx/_git/OpenGit".to_string()),
+                    push_url: None,
+                    provider: GitProvider::AzureDevops,
+                },
+                Remote {
+                    name: "other".to_string(),
+                    fetch_url: Some("git@ssh.dev.azure.com:v3/SecondOrg/project/repo".to_string()),
+                    push_url: None,
+                    provider: GitProvider::AzureDevops,
+                },
+            ],
+        }];
+
+        assert_eq!(
+            azure_org_hints_from_local_refs(&refs),
+            vec!["Hubley".to_string(), "SecondOrg".to_string()]
+        );
+    }
+
+    #[test]
+    fn encodes_azure_path_segments() {
+        assert_eq!(url_path_segment("hubley spfx"), "hubley%20spfx");
+        assert_eq!(append_query_param("https://example.test?a=1", "continuationToken", "a b"), "https://example.test?a=1&continuationToken=a%20b");
     }
 
     #[test]
@@ -3862,6 +6610,88 @@ mod tests {
         assert!(validate_snapshot_id("1710000000000-before-commit").is_ok());
         assert!(validate_snapshot_id("../bad").is_err());
         assert!(validate_snapshot_id("bad/path").is_err());
+    }
+
+    #[test]
+    fn resequences_stack_items_against_trunk() {
+        let mut stack = BranchStack {
+            id: "stack-test".to_string(),
+            name: "Test stack".to_string(),
+            trunk: "main".to_string(),
+            items: vec![
+                BranchStackItem {
+                    id: "two".to_string(),
+                    branch: "feature/two".to_string(),
+                    base_branch: "old".to_string(),
+                    order: 1,
+                    head_sha: None,
+                    upstream: None,
+                    pr_ref: None,
+                    status: BranchStackItemStatus::Unknown,
+                },
+                BranchStackItem {
+                    id: "one".to_string(),
+                    branch: "feature/one".to_string(),
+                    base_branch: "old".to_string(),
+                    order: 0,
+                    head_sha: None,
+                    upstream: None,
+                    pr_ref: None,
+                    status: BranchStackItemStatus::Unknown,
+                },
+            ],
+            status: BranchStackStatus::Unknown,
+            last_operation: None,
+            created_at: "1".to_string(),
+            updated_at: "1".to_string(),
+        };
+
+        stack_resequence_items(&mut stack);
+
+        assert_eq!(stack.items[0].branch, "feature/one");
+        assert_eq!(stack.items[0].base_branch, "main");
+        assert_eq!(stack.items[1].base_branch, "feature/one");
+    }
+
+    #[test]
+    fn validates_metadata_ids() {
+        assert!(validate_metadata_id("lane-123-good", "lane id").is_ok());
+        assert!(validate_metadata_id("../bad", "lane id").is_err());
+        assert!(validate_metadata_id("bad/path", "lane id").is_err());
+    }
+
+    #[test]
+    fn parses_branch_diff_shortstat() {
+        let (additions, deletions) =
+            parse_shortstat(" 4 files changed, 120 insertions(+), 17 deletions(-)");
+
+        assert_eq!(additions, Some(120));
+        assert_eq!(deletions, Some(17));
+    }
+
+    #[tokio::test]
+    async fn stores_stack_metadata_inside_git_dir() {
+        let repo = init_test_repo("stack-metadata");
+        commit_test_file(&repo, "file.txt", "one\n", "first commit");
+        run_git_test(&repo, &["branch", "feature/one"]);
+        let trunk = run_git_test(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .trim()
+            .to_string();
+
+        git_stack_create(StackCreateRequest {
+            repo_path: repo.to_string_lossy().to_string(),
+            name: "Feature stack".to_string(),
+            trunk: trunk.clone(),
+            branches: vec!["feature/one".to_string()],
+        })
+        .await
+        .expect("stack should create");
+
+        let stacks = read_branch_stacks(&repo).await.expect("stacks");
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].items[0].base_branch, trunk);
+
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[tokio::test]

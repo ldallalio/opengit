@@ -20,6 +20,75 @@ export interface Repository {
 
 export type GitProvider = "github" | "gitlab" | "bitbucket" | "azure-devops" | "unknown";
 
+export type ProviderConnectionStatus = "connected" | "missing-token" | "auth-failed" | "unavailable";
+
+export interface ProviderAccountStatus {
+  provider: GitProvider;
+  configured: boolean;
+  status: ProviderConnectionStatus;
+  label: string;
+  detail?: string;
+}
+
+export interface ProviderAccount {
+  id: string;
+  provider: GitProvider;
+  name: string;
+  displayName?: string;
+  url?: string;
+}
+
+export interface ProviderProject {
+  id: string;
+  provider: GitProvider;
+  accountId: string;
+  name: string;
+  url?: string;
+}
+
+export interface ProviderCloneUrl {
+  kind: "https" | "ssh" | "unknown";
+  url: string;
+  safeUrl: string;
+}
+
+export type LocalRepoMatchStatus = "not-cloned" | "cloned" | "missing-path" | "current";
+
+export interface LocalRepoMatch {
+  status: LocalRepoMatchStatus;
+  path?: string;
+  matchedRemote?: string;
+}
+
+export interface LocalRepositoryRef {
+  path: string;
+  exists: boolean;
+  isRepository: boolean;
+  remotes: Remote[];
+}
+
+export interface ProviderRepository {
+  id: string;
+  provider: GitProvider;
+  accountId: string;
+  accountName: string;
+  projectId?: string;
+  projectName?: string;
+  name: string;
+  defaultBranch?: string;
+  webUrl?: string;
+  cloneUrl?: ProviderCloneUrl;
+  localMatch: LocalRepoMatch;
+}
+
+export interface ProviderRepoCatalog {
+  provider: GitProvider;
+  accounts: ProviderAccount[];
+  projects: ProviderProject[];
+  repositories: ProviderRepository[];
+  refreshedAt: string;
+}
+
 export type WorktreeState =
   | "clean"
   | "dirty"
@@ -49,6 +118,38 @@ export interface Branch {
   isProtected: boolean;
 }
 
+export interface BranchInspection {
+  branch: Branch;
+  kind: "local" | "remote" | "tag" | "unknown";
+  upstream?: string;
+  defaultBranch?: string;
+  baseRef?: string;
+  headSha?: string;
+  lastCommit?: Commit;
+  aheadBehindUpstream?: AheadBehind;
+  aheadBehindDefault?: AheadBehind;
+  status: "current" | "up-to-date" | "ahead" | "behind" | "diverged" | "no-upstream" | "unknown";
+  recentCommits: Commit[];
+  diffSummary?: BranchDiffSummary;
+}
+
+export interface AheadBehind {
+  ahead: number;
+  behind: number;
+}
+
+export interface BranchDiffSummary {
+  baseRef: string;
+  fileCount: number;
+  additions?: number;
+  deletions?: number;
+  files: Array<{
+    path: string;
+    oldPath?: string;
+    status: FileStatus;
+  }>;
+}
+
 export interface Remote {
   name: string;
   fetchUrl?: string;
@@ -74,6 +175,13 @@ export interface PullRequest {
   labels: string[];
   checks: CheckRun[];
   draft: boolean;
+}
+
+export interface PullRequestRef {
+  provider: GitProvider;
+  providerId?: string;
+  url?: string;
+  state?: PullRequest["state"];
 }
 
 export interface CheckRun {
@@ -136,6 +244,65 @@ export interface UndoSnapshot {
   hasWorkingPatch: boolean;
 }
 
+export interface BranchStack {
+  id: string;
+  name: string;
+  trunk: string;
+  items: BranchStackItem[];
+  status: BranchStackStatus;
+  lastOperation?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type BranchStackStatus = "clean" | "needs-restack" | "conflicted" | "unknown";
+
+export interface BranchStackItem {
+  id: string;
+  branch: string;
+  baseBranch: string;
+  order: number;
+  headSha?: string;
+  upstream?: string;
+  prRef?: PullRequestRef;
+  status: BranchStackItemStatus;
+}
+
+export type BranchStackItemStatus = "clean" | "ahead" | "behind" | "needs-restack" | "conflicted" | "missing" | "unknown";
+
+export interface ParallelLane {
+  id: string;
+  name: string;
+  targetBranch: string;
+  baseHead: string;
+  applied: boolean;
+  status: ParallelLaneStatus;
+  paths: ParallelLanePath[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ParallelLaneStatus = "clean" | "dirty" | "blocked" | "conflicted" | "committed";
+
+export interface ParallelLanePath {
+  path: string;
+  oldPath?: string;
+  status: FileStatus;
+  source: "working" | "staged" | "untracked";
+}
+
+export interface GitWorkflowOperation {
+  id: string;
+  kind: "stack-restack" | "lane-apply" | "lane-unapply" | "lane-commit" | "worktree" | "unknown";
+  label: string;
+  status: "running" | "conflicted" | "blocked";
+  stackId?: string;
+  laneId?: string;
+  branch?: string;
+  baseBranch?: string;
+  createdAt: string;
+}
+
 export type FileStatus =
   | "added"
   | "modified"
@@ -184,4 +351,8 @@ export interface RepoSnapshot {
   commits: Commit[];
   conflicts: Conflict[];
   undoSnapshots: UndoSnapshot[];
+  branchStacks: BranchStack[];
+  parallelLanes: ParallelLane[];
+  worktrees: Worktree[];
+  activeOperation?: GitWorkflowOperation;
 }

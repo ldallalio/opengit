@@ -3,11 +3,29 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState
 } from "react";
-import type { Branch, Commit, CommitFile, Conflict, FileChange, FileStatus, RepoSnapshot, UndoSnapshot } from "@opengit/core";
+import type {
+  Branch,
+  BranchInspection,
+  BranchStack,
+  Commit,
+  CommitFile,
+  Conflict,
+  FileChange,
+  FileStatus,
+  GitProvider,
+  ProviderAccountStatus,
+  ProviderRepoCatalog,
+  ProviderRepository,
+  ParallelLane,
+  RepoSnapshot,
+  UndoSnapshot
+} from "@opengit/core";
 import { Button, EmptyState, IconButton, Panel } from "@opengit/ui";
 import {
   AlertTriangle,
@@ -18,7 +36,10 @@ import {
   ChevronDown,
   ChevronRight,
   ClipboardList,
+  Cloud,
   Code2,
+  Download,
+  ExternalLink,
   FileText,
   FolderOpen,
   GitBranch,
@@ -26,11 +47,13 @@ import {
   GitFork,
   GitPullRequest,
   History,
+  HardDrive,
   Eye,
   Link2,
   Maximize2,
   Minimize2,
   Moon,
+  MoreHorizontal,
   PackageOpen,
   Plug,
   Plus,
@@ -48,42 +71,57 @@ import {
 } from "lucide-react";
 import { clsx } from "clsx";
 import {
+  addBranchToStack,
   addRemote,
   abortGitOperation,
+  applyLane,
+  assignPathsToLane,
   cherryPickCommit,
+  chooseCloneRootFolder,
   chooseRepositoryFolder,
   checkoutBranch,
+  cloneRepo,
   continueGitOperation,
   commit,
   createBranch,
+  createLane,
+  createStack,
+  createStackChild,
   createTag,
   deleteBranch,
+  commitLane,
+  discardLane,
   discardPaths,
   fetchRepo,
   clearAzureDevOpsPat,
   getCommitFileDiff,
   getCommitFiles,
   getConflictVersions,
-  getAzureDevOpsStatus,
-  getOpenAiStatus,
   generateAiBranchName,
   generateAiCommitMessage,
   generateAiPrDescription,
   getDiff,
+  listProviderRepositories,
+  inspectBranch,
   isTauriRuntime,
   mergeBranch,
   openRepo,
   pullRepoFastForward,
   pullRepoRebase,
   pullRepo,
+  pushStack,
   pushRepo,
   rebaseOnto,
   refreshRepo,
   renameBranch,
+  removeBranchFromStack,
+  reorderStack,
+  restackStack,
   revertCommit,
   saveAzureDevOpsPat,
   saveOpenAiApiKey,
   markConflictResolved,
+  materializeLaneBranch,
   stagePaths,
   stashApply,
   stashDrop,
@@ -95,6 +133,8 @@ import {
   updateCommitMessage,
   undoLastCommit,
   unstagePaths,
+  unapplyLane,
+  syncStackTrunk,
   OpenGitApiError,
   resolveConflict,
   type AiPrDescriptionSuggestion,
@@ -102,6 +142,15 @@ import {
   type ConflictVersions
 } from "./api";
 import { demoSnapshot } from "./demo";
+import {
+  deriveCloneDestination,
+  filterProviderRepositories,
+  groupProviderRepositories,
+  mergeRepositoryLocalMatches,
+  type ProviderRepositoryFilters,
+  type RepoCloneFilter,
+  uniqueProjectNames
+} from "./repositoryManagement";
 
 type Theme = "dark" | "light";
 type DiffMode = "commit" | "working";
@@ -114,7 +163,6 @@ type ResizeTarget =
   | "sidebarRemotes"
   | "sidebarStashes"
   | "detailSelection"
-  | "bottomCommit"
   | "bottomOperations";
 type LayoutState = {
   sidebarWidth: number;
@@ -124,7 +172,6 @@ type LayoutState = {
   sidebarRemotesHeight: number;
   sidebarStashesHeight: number;
   detailSelectionHeight: number;
-  bottomCommitWidth: number;
   bottomOperationsWidth: number;
   sidebarCollapsed: boolean;
   detailCollapsed: boolean;
@@ -174,6 +221,11 @@ type BranchMenuAction =
   | "rebase"
   | "checkout"
   | "create-worktree"
+  | "stack-create"
+  | "stack-add"
+  | "stack-child"
+  | "stack-restack"
+  | "stack-pr-plan"
   | "create-branch"
   | "cherry-pick"
   | "reset"
@@ -222,43 +274,47 @@ type PreferenceSection =
 
 const defaultPath = localStorage.getItem("opengit:lastPath") ?? "/Users/logandallalio/Documents/OpenGit";
 const graphColors = ["#58a6ff", "#b388ff", "#3fb950", "#ff7b72", "#e3b341", "#d2a8ff", "#79c0ff", "#a5d6ff", "#f0883e", "#8b949e"];
-const graphLaneWidth = 16;
-const graphRowHeight = 34;
+const graphLaneWidth = 18;
+const graphRowHeight = 36;
 const maxVisibleGraphLanes = 12;
 const repoTabLimit = 9;
+const autoRefreshIntervalMs = 2500;
 const historyLimitOptions = [100, 250, 500, 1000, 2000] as const;
-const historyColumnStorageKey = "opengit:historyColumnWidths";
+const historyColumnStorageKey = "opengit:historyColumnWidths:v2";
 const historyFilterStorageKey = "opengit:historyFilters";
+const cloneRootStorageKey = "opengit:defaultCloneRoot";
+const providerLocatedPathsStorageKey = "opengit:providerLocatedPaths";
+const openAiConfiguredStorageKey = "opengit:openaiConfigured";
+const azureDevOpsConfiguredStorageKey = "opengit:azureDevOpsConfigured";
 const defaultHistoryFilters: HistoryFilters = {
   author: "",
   type: "",
   dateDirection: "desc"
 };
 const defaultHistoryColumnWidths: HistoryColumnWidths = {
-  branch: 150,
-  graph: 180,
-  message: 520,
-  author: 126,
-  date: 132,
-  hash: 72
+  branch: 170,
+  graph: 210,
+  message: 620,
+  author: 150,
+  date: 152,
+  hash: 82
 };
 const historyColumnLimits: Record<HistoryColumnKey, { min: number; max: number }> = {
-  branch: { min: 90, max: 360 },
-  graph: { min: 88, max: 420 },
-  message: { min: 240, max: 1200 },
-  author: { min: 82, max: 260 },
-  date: { min: 96, max: 260 },
-  hash: { min: 54, max: 160 }
+  branch: { min: 130, max: 420 },
+  graph: { min: 120, max: 480 },
+  message: { min: 360, max: 1400 },
+  author: { min: 110, max: 280 },
+  date: { min: 116, max: 280 },
+  hash: { min: 64, max: 180 }
 };
 const defaultLayout: LayoutState = {
-  sidebarWidth: 280,
-  detailWidth: 340,
-  bottomHeight: 260,
-  sidebarBranchesHeight: 180,
+  sidebarWidth: 320,
+  detailWidth: 380,
+  bottomHeight: 240,
+  sidebarBranchesHeight: 420,
   sidebarRemotesHeight: 145,
   sidebarStashesHeight: 145,
-  detailSelectionHeight: 142,
-  bottomCommitWidth: 330,
+  detailSelectionHeight: 220,
   bottomOperationsWidth: 260,
   sidebarCollapsed: false,
   detailCollapsed: false,
@@ -293,6 +349,56 @@ function loadHistoryLimit() {
   return historyLimitOptions.includes(parsed as (typeof historyLimitOptions)[number]) ? parsed : 250;
 }
 
+function repoSnapshotSignature(snapshot: RepoSnapshot) {
+  return JSON.stringify({
+    repository: snapshot.repository,
+    currentBranch: snapshot.currentBranch,
+    upstream: snapshot.upstream,
+    ahead: snapshot.ahead,
+    behind: snapshot.behind,
+    changes: snapshot.changes,
+    branches: snapshot.branches,
+    remotes: snapshot.remotes,
+    stashes: snapshot.stashes,
+    commits: snapshot.commits.map((commit) => ({
+      sha: commit.sha,
+      parents: commit.parents,
+      message: commit.message,
+      refs: commit.refs
+    })),
+    conflicts: snapshot.conflicts,
+    undoSnapshots: snapshot.undoSnapshots,
+    branchStacks: snapshot.branchStacks,
+    parallelLanes: snapshot.parallelLanes,
+    worktrees: snapshot.worktrees,
+    activeOperation: snapshot.activeOperation
+  });
+}
+
+function defaultBranchRef(snapshot: RepoSnapshot) {
+  return snapshot.currentBranch ?? snapshot.branches.find((branch) => branch.isCurrent)?.fullRef ?? snapshot.branches[0]?.fullRef ?? null;
+}
+
+function snapshotHasBranchRef(snapshot: RepoSnapshot, ref: string) {
+  return snapshot.branches.some((branch) => branch.name === ref || branch.fullRef === ref || normalizeRefLabel(branch.fullRef) === ref);
+}
+
+function findMatchingChange(changes: FileChange[], current: FileChange | null) {
+  if (!current) return changes[0] ?? null;
+  return (
+    changes.find(
+      (change) =>
+        change.path === current.path &&
+        change.oldPath === current.oldPath &&
+        change.staged === current.staged &&
+        change.unstaged === current.unstaged
+    ) ??
+    changes.find((change) => change.path === current.path && change.oldPath === current.oldPath) ??
+    changes[0] ??
+    null
+  );
+}
+
 function loadHistoryColumnWidths(): HistoryColumnWidths {
   try {
     const parsed = JSON.parse(localStorage.getItem(historyColumnStorageKey) ?? "{}") as Partial<HistoryColumnWidths>;
@@ -324,6 +430,37 @@ function loadHistoryFilters(): HistoryFilters {
   }
 }
 
+function loadDefaultCloneRoot() {
+  return localStorage.getItem(cloneRootStorageKey) ?? "/Users/logandallalio/Documents";
+}
+
+function loadProviderLocatedPaths() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(providerLocatedPathsStorageKey) ?? "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function loadStoredCredentialFlag(key: string) {
+  return localStorage.getItem(key) === "true";
+}
+
+function azureProviderStatus(configured: boolean): ProviderAccountStatus {
+  return {
+    provider: "azure-devops",
+    configured,
+    status: configured ? "connected" : "unavailable",
+    label: "Azure DevOps",
+    detail: configured
+      ? "Saved-token state is remembered locally. The keychain is checked only when you use Azure DevOps."
+      : "OpenGit will check the keychain only when you save a PAT or refresh repositories."
+  };
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
@@ -335,6 +472,11 @@ export default function App() {
   const [historyLimit, setHistoryLimit] = useState(loadHistoryLimit);
   const [snapshot, setSnapshot] = useState<RepoSnapshot | null>(() => (runningInTauri ? null : demoSnapshot));
   const [selectedCommit, setSelectedCommit] = useState<Commit | null>(snapshot?.commits[0] ?? null);
+  const [worktreeSelected, setWorktreeSelected] = useState(false);
+  const [selectedBranchRef, setSelectedBranchRef] = useState<string | null>(snapshot?.currentBranch ?? null);
+  const [branchInspection, setBranchInspection] = useState<BranchInspection | null>(null);
+  const [branchInspectionLoading, setBranchInspectionLoading] = useState(false);
+  const [branchInspectionError, setBranchInspectionError] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<FileChange | null>(snapshot?.changes[0] ?? null);
   const [selectedCommitFile, setSelectedCommitFile] = useState<CommitFile | null>(null);
   const [selectedConflictPath, setSelectedConflictPath] = useState<string | null>(snapshot?.conflicts[0]?.path ?? null);
@@ -352,10 +494,24 @@ export default function App() {
   const [commitDiffLoading, setCommitDiffLoading] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
   const [selectedCommitMessage, setSelectedCommitMessage] = useState(snapshot?.commits[0]?.message ?? "");
-  const [openAiConfigured, setOpenAiConfigured] = useState(false);
+  const [commitEditorOpen, setCommitEditorOpen] = useState(false);
+  const [openAiConfigured, setOpenAiConfigured] = useState(() => loadStoredCredentialFlag(openAiConfiguredStorageKey));
   const [openAiModel, setOpenAiModel] = useState(localStorage.getItem("opengit:openaiModel") ?? "gpt-5-mini");
-  const [azureDevOpsConfigured, setAzureDevOpsConfigured] = useState(false);
+  const [azureDevOpsConfigured, setAzureDevOpsConfigured] = useState(() => loadStoredCredentialFlag(azureDevOpsConfiguredStorageKey));
   const [preferredIntegration, setPreferredIntegration] = useState("OpenAI");
+  const [repositoryManagementOpen, setRepositoryManagementOpen] = useState(false);
+  const [providerAccounts, setProviderAccounts] = useState<ProviderAccountStatus[]>(() => [azureProviderStatus(loadStoredCredentialFlag(azureDevOpsConfiguredStorageKey))]);
+  const [providerCatalog, setProviderCatalog] = useState<ProviderRepoCatalog | null>(runningInTauri ? null : null);
+  const [providerLoading, setProviderLoading] = useState(false);
+  const [providerError, setProviderError] = useState<string | null>(null);
+  const [cloneRoot, setCloneRoot] = useState(loadDefaultCloneRoot);
+  const [providerLocatedPaths, setProviderLocatedPaths] = useState<Record<string, string>>(loadProviderLocatedPaths);
+  const [providerFilters, setProviderFilters] = useState<ProviderRepositoryFilters>({
+    search: "",
+    provider: "all",
+    project: "all",
+    cloneStatus: "all"
+  });
   const [aiGeneratingCommit, setAiGeneratingCommit] = useState(false);
   const [aiGeneratingBranch, setAiGeneratingBranch] = useState(false);
   const [aiGeneratingPr, setAiGeneratingPr] = useState(false);
@@ -382,6 +538,15 @@ export default function App() {
   const [operationLog, setOperationLog] = useState<string[]>([
     runningInTauri ? "OpenGit ready" : "Browser preview uses demo data"
   ]);
+  const [selectedStackId, setSelectedStackId] = useState<string | null>(null);
+  const [selectedLaneId, setSelectedLaneId] = useState<string | null>(snapshot?.parallelLanes[0]?.id ?? null);
+  const [parallelMode, setParallelMode] = useState(false);
+  const snapshotRef = useRef<RepoSnapshot | null>(snapshot);
+  const historyLimitRef = useRef(historyLimit);
+  const loadingRef = useRef(loading);
+  const commitEditorOpenRef = useRef(commitEditorOpen);
+  const autoRefreshInFlightRef = useRef(false);
+  const autoRefreshErrorRef = useRef<string | null>(null);
 
   const stagedChanges = useMemo(() => snapshot?.changes.filter((change) => change.staged) ?? [], [snapshot]);
   const unstagedChanges = useMemo(() => snapshot?.changes.filter((change) => change.unstaged) ?? [], [snapshot]);
@@ -402,21 +567,69 @@ export default function App() {
   const topbarBranches = useMemo(() => (snapshot ? displayBranches(snapshot) : []), [snapshot]);
   const filteredTopbarBranches = useMemo(() => filterBranches(topbarBranches, branchSearch), [topbarBranches, branchSearch]);
   const activeRepoPath = snapshot?.repository.path ?? repoPath;
+  const selectedStack = useMemo(
+    () => snapshot?.branchStacks.find((stack) => stack.id === selectedStackId) ?? null,
+    [snapshot, selectedStackId]
+  );
+  const selectedLane = useMemo(
+    () => snapshot?.parallelLanes.find((lane) => lane.id === selectedLaneId) ?? snapshot?.parallelLanes[0] ?? null,
+    [snapshot, selectedLaneId]
+  );
+  const hasWorkingChanges = (snapshot?.changes.length ?? 0) > 0;
+  const laneByPath = useMemo(() => buildLanePathMap(snapshot?.parallelLanes ?? []), [snapshot]);
+  const laneFilteredUnstagedChanges = useMemo(
+    () => filterChangesByLane(unstagedChanges, parallelMode ? selectedLaneId : undefined, laneByPath),
+    [unstagedChanges, parallelMode, selectedLaneId, laneByPath]
+  );
+  const laneFilteredStagedChanges = useMemo(
+    () => filterChangesByLane(stagedChanges, parallelMode ? selectedLaneId : undefined, laneByPath),
+    [stagedChanges, parallelMode, selectedLaneId, laneByPath]
+  );
+  const inspectorFileTitle = worktreeSelected ? `Working Changes (${snapshot?.changes.length ?? 0})` : `Changed Files (${commitFiles.length})`;
   const visibleRepoTabs = useMemo(() => uniqueRepoPaths([activeRepoPath, ...repoTabs]).slice(0, repoTabLimit), [activeRepoPath, repoTabs]);
+  const providerLocalPaths = useMemo(
+    () => uniqueRepoPaths([activeRepoPath, ...repoTabs, ...recentRepos, ...Object.values(providerLocatedPaths)]),
+    [activeRepoPath, providerLocatedPaths, recentRepos, repoTabs]
+  );
+  const providerRepositories = useMemo(
+    () => (providerCatalog ? mergeRepositoryLocalMatches(providerCatalog.repositories, [], providerLocatedPaths, activeRepoPath) : []),
+    [activeRepoPath, providerCatalog, providerLocatedPaths]
+  );
+  const filteredProviderRepositories = useMemo(
+    () => filterProviderRepositories(providerRepositories, providerFilters),
+    [providerFilters, providerRepositories]
+  );
+  const providerRepositoryGroups = useMemo(() => groupProviderRepositories(filteredProviderRepositories), [filteredProviderRepositories]);
+  const providerProjectNames = useMemo(() => uniqueProjectNames(providerRepositories), [providerRepositories]);
   const contentGridStyle = {
     "--sidebar-track": layout.sidebarCollapsed ? "0px" : `${layout.sidebarWidth}px`,
     "--sidebar-handle-track": layout.sidebarCollapsed ? "0px" : "6px",
     "--detail-track": layout.detailCollapsed ? "0px" : `${layout.detailWidth}px`,
     "--detail-handle-track": layout.detailCollapsed ? "0px" : "6px",
-    "--bottom-track": layout.bottomCollapsed ? "0px" : `${layout.bottomHeight}px`,
+    "--bottom-track": layout.bottomCollapsed ? "0px" : hasWorkingChanges ? `${layout.bottomHeight}px` : "44px",
     "--bottom-handle-track": layout.bottomCollapsed ? "0px" : "6px",
     "--sidebar-branches-height": `${layout.sidebarBranchesHeight}px`,
     "--sidebar-remotes-height": `${layout.sidebarRemotesHeight}px`,
     "--sidebar-stashes-height": `${layout.sidebarStashesHeight}px`,
     "--detail-selection-height": `${layout.detailSelectionHeight}px`,
-    "--bottom-commit-width": `${layout.bottomCommitWidth}px`,
     "--bottom-operations-width": `${layout.bottomOperationsWidth}px`
   } as CSSProperties;
+
+  useEffect(() => {
+    snapshotRef.current = snapshot;
+  }, [snapshot]);
+
+  useEffect(() => {
+    historyLimitRef.current = historyLimit;
+  }, [historyLimit]);
+
+  useEffect(() => {
+    loadingRef.current = loading;
+  }, [loading]);
+
+  useEffect(() => {
+    commitEditorOpenRef.current = commitEditorOpen;
+  }, [commitEditorOpen]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -426,6 +639,15 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("opengit:openaiModel", openAiModel);
   }, [openAiModel]);
+
+  useEffect(() => {
+    localStorage.setItem(openAiConfiguredStorageKey, String(openAiConfigured));
+  }, [openAiConfigured]);
+
+  useEffect(() => {
+    localStorage.setItem(azureDevOpsConfiguredStorageKey, String(azureDevOpsConfigured));
+    setProviderAccounts([azureProviderStatus(azureDevOpsConfigured)]);
+  }, [azureDevOpsConfigured]);
 
   useEffect(() => {
     localStorage.setItem(historyFilterStorageKey, JSON.stringify(historyFilters));
@@ -470,40 +692,6 @@ export default function App() {
       cancelled = true;
     };
   }, [activeConflictState, selectedConflict?.path, selectedConflictPath, snapshot]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void getOpenAiStatus()
-      .then((status) => {
-        if (!cancelled) setOpenAiConfigured(status.configured);
-      })
-      .catch((statusError) => {
-        if (!cancelled) {
-          const message = statusError instanceof Error ? statusError.message : String(statusError);
-          setOperationLog((log) => [`OpenAI status check failed: ${message}`, ...log].slice(0, 8));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    void getAzureDevOpsStatus()
-      .then((status) => {
-        if (!cancelled) setAzureDevOpsConfigured(status.configured);
-      })
-      .catch((statusError) => {
-        if (!cancelled) {
-          const message = statusError instanceof Error ? statusError.message : String(statusError);
-          setOperationLog((log) => [`Azure DevOps status check failed: ${message}`, ...log].slice(0, 8));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -558,13 +746,63 @@ export default function App() {
   }, [branchSwitcherOpen]);
 
   useEffect(() => {
-    if (!snapshot || !selectedFile) {
+    if (!snapshot) {
+      setSelectedStackId(null);
+      setSelectedLaneId(null);
+      setParallelMode(false);
+      setSelectedBranchRef(null);
+      return;
+    }
+    if (selectedStackId && !snapshot.branchStacks.some((stack) => stack.id === selectedStackId)) {
+      setSelectedStackId(snapshot.branchStacks[0]?.id ?? null);
+    }
+    if (selectedLaneId && !snapshot.parallelLanes.some((lane) => lane.id === selectedLaneId)) {
+      setSelectedLaneId(snapshot.parallelLanes[0]?.id ?? null);
+    }
+    if (!selectedBranchRef) {
+      setSelectedBranchRef(snapshot.currentBranch ?? snapshot.branches.find((branch) => branch.isCurrent)?.fullRef ?? snapshot.branches[0]?.fullRef ?? null);
+    }
+  }, [snapshot, selectedBranchRef, selectedLaneId, selectedStackId]);
+
+  useEffect(() => {
+    if (!snapshot || !selectedBranchRef) {
+      setBranchInspection(null);
+      setBranchInspectionError(null);
+      setBranchInspectionLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setBranchInspectionLoading(true);
+    setBranchInspectionError(null);
+    void inspectBranch(snapshot.repository.path, selectedBranchRef)
+      .then((inspection) => {
+        if (!cancelled) setBranchInspection(inspection);
+      })
+      .catch((inspectionError) => {
+        if (!cancelled) {
+          setBranchInspection(null);
+          setBranchInspectionError(inspectionError instanceof Error ? inspectionError.message : String(inspectionError));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setBranchInspectionLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [snapshot?.repository.head, snapshot?.repository.path, snapshot?.changes.length, selectedBranchRef]);
+
+  useEffect(() => {
+    const currentRepoPath = snapshot?.repository.path;
+    if (!currentRepoPath || !selectedFile) {
       setDiff("");
       return;
     }
 
     let cancelled = false;
-    void getDiff(snapshot.repository.path, selectedFile.path, selectedFile.staged)
+    void getDiff(currentRepoPath, selectedFile.path, selectedFile.staged)
       .then((value) => {
         if (!cancelled) setDiff(value);
       })
@@ -575,10 +813,11 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [snapshot, selectedFile]);
+  }, [snapshot?.repository.path, selectedFile]);
 
   useEffect(() => {
-    if (!snapshot || !selectedCommit) {
+    const currentRepoPath = snapshot?.repository.path;
+    if (!currentRepoPath || !selectedCommit) {
       setCommitFiles([]);
       setSelectedCommitFile(null);
       setCommitDiff("");
@@ -593,7 +832,7 @@ export default function App() {
     setSelectedCommitFile(null);
     setCommitDiff("");
 
-    void getCommitFiles(snapshot.repository.path, selectedCommit.sha)
+    void getCommitFiles(currentRepoPath, selectedCommit.sha)
       .then((files) => {
         if (cancelled) return;
         setCommitFiles(files);
@@ -610,17 +849,18 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [snapshot, selectedCommit]);
+  }, [snapshot?.repository.path, selectedCommit?.sha]);
 
   useEffect(() => {
-    if (!snapshot || !selectedCommit || !selectedCommitFile) {
+    const currentRepoPath = snapshot?.repository.path;
+    if (!currentRepoPath || !selectedCommit || !selectedCommitFile) {
       setCommitDiff("");
       return;
     }
 
     let cancelled = false;
     setCommitDiffLoading(true);
-    void getCommitFileDiff(snapshot.repository.path, selectedCommit.sha, selectedCommitFile.path, selectedCommitFile.oldPath)
+    void getCommitFileDiff(currentRepoPath, selectedCommit.sha, selectedCommitFile.path, selectedCommitFile.oldPath)
       .then((value) => {
         if (!cancelled) setCommitDiff(value);
       })
@@ -634,7 +874,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [snapshot, selectedCommit, selectedCommitFile]);
+  }, [snapshot?.repository.path, selectedCommit?.sha, selectedCommitFile?.path, selectedCommitFile?.oldPath]);
 
   const rememberRepo = (path: string) => {
     setRecentRepos((current) => {
@@ -655,19 +895,102 @@ export default function App() {
   };
 
   const setSnapshotState = (next: RepoSnapshot) => {
+    snapshotRef.current = next;
     setSnapshot(next);
     setRepoPath(next.repository.path);
     localStorage.setItem("opengit:lastPath", next.repository.path);
     rememberRepo(next.repository.path);
     addRepoTab(next.repository.path);
+    setSelectedBranchRef(defaultBranchRef(next));
     setSelectedCommit(next.commits[0] ?? null);
     setSelectedCommitMessage(next.commits[0]?.message ?? "");
+    setWorktreeSelected(worktreeSelected && next.changes.length > 0);
+    setCommitEditorOpen(false);
     setSelectedFile(next.changes[0] ?? null);
     setSelectedConflictPath(next.conflicts[0]?.path ?? null);
     setDiffMode(next.commits.length > 0 ? "commit" : "working");
     setCenterView(hasActiveConflictState(next) ? "conflict" : "graph");
     setDiffExpanded(false);
   };
+
+  const applyAutoSnapshot = useCallback((next: RepoSnapshot) => {
+    const previous = snapshotRef.current;
+    if (previous && repoSnapshotSignature(previous) === repoSnapshotSignature(next)) {
+      return false;
+    }
+
+    snapshotRef.current = next;
+    setSnapshot(next);
+    setRepoPath(next.repository.path);
+    localStorage.setItem("opengit:lastPath", next.repository.path);
+    setSelectedBranchRef((current) => (current && snapshotHasBranchRef(next, current) ? current : defaultBranchRef(next)));
+    setSelectedCommit((current) => {
+      const selected = current ? next.commits.find((commit) => commit.sha === current.sha) ?? null : next.commits[0] ?? null;
+      if (!commitEditorOpenRef.current && selected?.sha !== current?.sha) {
+        setSelectedCommitMessage(selected?.message ?? "");
+      }
+      return selected;
+    });
+    setWorktreeSelected((current) => current && next.changes.length > 0);
+    setSelectedFile((current) => findMatchingChange(next.changes, current));
+    setSelectedConflictPath((current) => (current && next.conflicts.some((conflict) => conflict.path === current) ? current : next.conflicts[0]?.path ?? null));
+    setDiffMode((current) => (current === "commit" && next.commits.length === 0 ? "working" : current));
+    setCenterView((current) => {
+      const previouslyConflicted = previous ? hasActiveConflictState(previous) : false;
+      const nowConflicted = hasActiveConflictState(next);
+      if (!previouslyConflicted && nowConflicted) return "conflict";
+      if (current === "conflict" && !nowConflicted) return "graph";
+      return current;
+    });
+    return true;
+  }, []);
+
+  useEffect(() => {
+    const activePath = snapshot?.repository.path;
+    if (!runningInTauri || !activePath) return;
+
+    let disposed = false;
+    const refreshFromDisk = async () => {
+      if (disposed || document.visibilityState === "hidden" || loadingRef.current || autoRefreshInFlightRef.current) return;
+
+      autoRefreshInFlightRef.current = true;
+      try {
+        const next = await refreshRepo(activePath, historyLimitRef.current);
+        if (disposed || loadingRef.current || snapshotRef.current?.repository.path !== activePath) return;
+
+        const changed = applyAutoSnapshot(next);
+        autoRefreshErrorRef.current = null;
+        if (changed) {
+          setOperationLog((log) => ["Repository updated from disk", ...log].slice(0, 8));
+        }
+      } catch (refreshError) {
+        if (disposed) return;
+        const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
+        if (autoRefreshErrorRef.current !== message) {
+          autoRefreshErrorRef.current = message;
+          setOperationLog((log) => [`Auto refresh failed: ${message}`, ...log].slice(0, 8));
+        }
+      } finally {
+        autoRefreshInFlightRef.current = false;
+      }
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState !== "hidden") {
+        void refreshFromDisk();
+      }
+    };
+
+    const intervalId = window.setInterval(refreshFromDisk, autoRefreshIntervalMs);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [applyAutoSnapshot, runningInTauri, snapshot?.repository.path]);
 
   const runSnapshotOperation = async (label: string, operation: () => Promise<RepoSnapshot>) => {
     setLoading(true);
@@ -719,7 +1042,12 @@ export default function App() {
 
     setSnapshot(null);
     setSelectedCommit(null);
+    setSelectedBranchRef(null);
+    setBranchInspection(null);
+    setBranchInspectionError(null);
+    setWorktreeSelected(false);
     setSelectedCommitMessage("");
+    setCommitEditorOpen(false);
     setSelectedFile(null);
     setSelectedCommitFile(null);
     setSelectedConflictPath(null);
@@ -772,13 +1100,91 @@ export default function App() {
     }
   };
 
+  const refreshProviderRepositories = async (provider: GitProvider = "azure-devops", localPaths = providerLocalPaths) => {
+    setProviderLoading(true);
+    setProviderError(null);
+    try {
+      const catalog = await listProviderRepositories(provider, localPaths);
+      if (provider === "azure-devops") {
+        setAzureDevOpsConfigured(true);
+      }
+      setProviderCatalog(catalog);
+      setOperationLog((log) => [`Repository catalog refreshed: ${catalog.repositories.length} repos`, ...log].slice(0, 8));
+    } catch (operationError) {
+      const message = operationError instanceof Error ? operationError.message : String(operationError);
+      setProviderError(message);
+      setOperationLog((log) => [`Repository catalog failed: ${message}`, ...log].slice(0, 8));
+      if (operationError instanceof OpenGitApiError) {
+        if (operationError.code === "AZURE_DEVOPS_TOKEN_MISSING") {
+          setAzureDevOpsConfigured(false);
+          setPreferredIntegration("Azure DevOps");
+          setPreferencesSection("integrations");
+          setPreferencesOpen(true);
+        } else if (operationError.code === "AZURE_DEVOPS_AUTH_FAILED") {
+          setAzureDevOpsConfigured(true);
+          setPreferredIntegration("Azure DevOps");
+          setPreferencesSection("integrations");
+          setPreferencesOpen(true);
+        }
+      }
+    } finally {
+      setProviderLoading(false);
+    }
+  };
+
+  const openRepositoryManagement = () => {
+    setRepositoryManagementOpen(true);
+    void refreshProviderRepositories();
+  };
+
+  const chooseDefaultCloneRoot = async () => {
+    const selected = await chooseCloneRootFolder();
+    if (!selected) return;
+    setCloneRoot(selected);
+    localStorage.setItem(cloneRootStorageKey, selected);
+  };
+
+  const cloneProviderRepository = (repo: ProviderRepository) => {
+    if (!repo.cloneUrl?.url) {
+      setProviderError("This repository does not include an HTTPS clone URL.");
+      return;
+    }
+    const destination = deriveCloneDestination(cloneRoot, repo.name);
+    if (!destination.ok) {
+      setProviderError(destination.message);
+      return;
+    }
+    void runSnapshotOperation(`Clone ${repo.name}`, () => cloneRepo(repo.cloneUrl!.url, destination.path, historyLimit));
+  };
+
+  const openProviderRepository = (repo: ProviderRepository) => {
+    const path = repo.localMatch.path;
+    if (path && (repo.localMatch.status === "cloned" || repo.localMatch.status === "current")) {
+      void openRepositoryPath(path);
+      return;
+    }
+    cloneProviderRepository(repo);
+  };
+
+  const locateProviderRepository = async (repo: ProviderRepository) => {
+    const selected = await chooseRepositoryFolder();
+    if (!selected) return;
+    const next = { ...providerLocatedPaths, [repo.id]: selected };
+    setProviderLocatedPaths(next);
+    localStorage.setItem(providerLocatedPathsStorageKey, JSON.stringify(next));
+    await openRepositoryPath(selected);
+    void refreshProviderRepositories(repo.provider, uniqueRepoPaths([activeRepoPath, ...repoTabs, ...recentRepos, ...Object.values(next), selected]));
+  };
+
   const openCommitDiff = (file: CommitFile) => {
+    setWorktreeSelected(false);
     setSelectedCommitFile(file);
     setDiffMode("commit");
     setCenterView("diff");
   };
 
   const openWorkingDiff = (change: FileChange) => {
+    setWorktreeSelected(true);
     setSelectedFile(change);
     setDiffMode("working");
     setCenterView("diff");
@@ -795,6 +1201,54 @@ export default function App() {
       x: clamp(event.clientX, 8, Math.max(8, window.innerWidth - menuWidth - 8)),
       y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - menuHeight - 8))
     });
+  };
+
+  const selectBranchForInspection = (target: BranchMenuTarget | DisplayBranch | Branch) => {
+    setSelectedBranchRef(branchRefForInspection(target));
+  };
+
+  const checkoutInspectedBranch = (inspection: BranchInspection) => {
+    if (inspection.kind === "remote") {
+      setError("Create or checkout a local branch before checking out a remote tracking ref.");
+      return;
+    }
+    const message = inspection.kind === "tag" ? `Checkout tag '${inspection.branch.name}'? This will detach HEAD.` : undefined;
+    runBranchTargetOperation("Checkout branch", (repo) => checkoutBranch(repo, inspection.branch.name), message);
+  };
+
+  const fetchForInspectedBranch = () => {
+    const repo = requireRepo();
+    if (!repo) return;
+    void runSnapshotOperation("Fetch", () => fetchRepo(repo));
+  };
+
+  const pullInspectedBranch = (inspection: BranchInspection) => {
+    if (!inspection.branch.isCurrent) {
+      setError("Checkout this branch before pulling so OpenGit does not update the wrong working tree.");
+      return;
+    }
+    const repo = requireRepo();
+    if (!repo) return;
+    void runSnapshotOperation("Pull fast-forward", () => pullRepoFastForward(repo));
+  };
+
+  const pushInspectedBranch = (inspection: BranchInspection) => {
+    const repo = requireRepo();
+    const remote = snapshot?.remotes[0];
+    if (!repo) return;
+    if (!remote) {
+      setError("Add a remote before pushing.");
+      return;
+    }
+    if (inspection.kind !== "local" && inspection.kind !== "unknown") {
+      setError("Only local branches can be pushed.");
+      return;
+    }
+    void runSnapshotOperation("Push branch", () => pushRepo(repo, remote.name, inspection.branch.name, false, !inspection.upstream));
+  };
+
+  const openInspectorBranchMenu = (inspection: BranchInspection, event: ReactMouseEvent<HTMLElement>) => {
+    openBranchMenu(targetFromInspection(inspection), event);
   };
 
   const pendingBranchAction = (label: string) => {
@@ -895,6 +1349,36 @@ export default function App() {
       return;
     }
 
+    if (action === "stack-create") {
+      setBranchMenu(null);
+      createStackFromBranch(target.name);
+      return;
+    }
+
+    if (action === "stack-add") {
+      setBranchMenu(null);
+      addBranchToSelectedStack(target.name);
+      return;
+    }
+
+    if (action === "stack-child") {
+      setBranchMenu(null);
+      createChildBranchForStack(target.name);
+      return;
+    }
+
+    if (action === "stack-restack") {
+      setBranchMenu(null);
+      restackSelectedStack();
+      return;
+    }
+
+    if (action === "stack-pr-plan") {
+      setBranchMenu(null);
+      prepareSelectedStackPrChain();
+      return;
+    }
+
     if (action === "create-branch") {
       const defaultName = defaultBranchFromTarget(target);
       const nextName = window.prompt("New branch name", defaultName);
@@ -980,11 +1464,10 @@ export default function App() {
         if (target === "sidebar") next.sidebarWidth = clamp(initial.sidebarWidth + deltaX, 180, 520);
         if (target === "detail") next.detailWidth = clamp(initial.detailWidth - deltaX, 260, 680);
         if (target === "bottom") next.bottomHeight = clamp(initial.bottomHeight - deltaY, 150, 520);
-        if (target === "sidebarBranches") next.sidebarBranchesHeight = clamp(initial.sidebarBranchesHeight + deltaY, 80, 420);
+        if (target === "sidebarBranches") next.sidebarBranchesHeight = clamp(initial.sidebarBranchesHeight + deltaY, 180, 760);
         if (target === "sidebarRemotes") next.sidebarRemotesHeight = clamp(initial.sidebarRemotesHeight + deltaY, 80, 360);
         if (target === "sidebarStashes") next.sidebarStashesHeight = clamp(initial.sidebarStashesHeight + deltaY, 80, 360);
-        if (target === "detailSelection") next.detailSelectionHeight = clamp(initial.detailSelectionHeight + deltaY, 80, 300);
-        if (target === "bottomCommit") next.bottomCommitWidth = clamp(initial.bottomCommitWidth - deltaX, 230, 560);
+        if (target === "detailSelection") next.detailSelectionHeight = clamp(initial.detailSelectionHeight + deltaY, 120, 460);
         if (target === "bottomOperations") next.bottomOperationsWidth = clamp(initial.bottomOperationsWidth - deltaX, 180, 480);
         return next;
       });
@@ -1060,6 +1543,171 @@ export default function App() {
     void runSnapshotOperation(label, () => operation(repo, paths));
   };
 
+  const createStackFromBranch = (branchName?: string) => {
+    const repo = requireRepo();
+    if (!repo || !snapshot) return;
+    const currentBranch = branchName ?? snapshot.currentBranch ?? "";
+    if (!currentBranch || currentBranch === "HEAD" || currentBranch === "(detached)") {
+      setError("Checkout or select a local branch before creating a stack.");
+      return;
+    }
+    const defaultTrunk = snapshot.branches.find((branch) => branch.name === "main" || branch.name === "master")?.name ?? currentBranch;
+    const trunk = window.prompt("Stack trunk branch", defaultTrunk);
+    if (!trunk?.trim()) return;
+    const name = window.prompt("Stack name", `${currentBranch} stack`);
+    if (!name?.trim()) return;
+    const branches = currentBranch === trunk.trim() ? [] : [currentBranch];
+    void runSnapshotOperation("Create stack", () => createStack(repo, name.trim(), trunk.trim(), branches)).then(() => {
+      setOperationLog((log) => [`Created stack ${name.trim()}`, ...log].slice(0, 8));
+    });
+  };
+
+  const addBranchToSelectedStack = (branchName?: string) => {
+    const repo = requireRepo();
+    if (!repo || !snapshot) return;
+    const stack = selectedStack ?? snapshot.branchStacks[0];
+    const branch = branchName ?? snapshot.currentBranch;
+    if (!stack) {
+      createStackFromBranch(branch ?? undefined);
+      return;
+    }
+    if (!branch || branch === "HEAD" || branch === "(detached)") {
+      setError("Select a local branch to add to the stack.");
+      return;
+    }
+    void runSnapshotOperation("Add branch to stack", () => addBranchToStack(repo, stack.id, branch));
+  };
+
+  const createChildBranchForStack = (baseBranch?: string) => {
+    const repo = requireRepo();
+    if (!repo || !selectedStack) {
+      setError("Select a stack before creating a child branch.");
+      return;
+    }
+    const base = baseBranch ?? selectedStack.items.at(-1)?.branch ?? selectedStack.trunk;
+    const name = window.prompt("Child branch name", `${base.replace(/^origin\//, "")}-child`);
+    if (!name?.trim()) return;
+    void runSnapshotOperation("Create stack child branch", () => createStackChild(repo, selectedStack.id, base, name.trim()));
+  };
+
+  const restackSelectedStack = () => {
+    const repo = requireRepo();
+    if (!repo || !selectedStack) {
+      setError("Select a stack before restacking.");
+      return;
+    }
+    if (!window.confirm(`Restack '${selectedStack.name}' from ${selectedStack.trunk}? OpenGit will create a safety snapshot first.`)) return;
+    void runSnapshotOperation("Restack stack", () => restackStack(repo, selectedStack.id));
+  };
+
+  const syncSelectedStackTrunk = () => {
+    const repo = requireRepo();
+    if (!repo || !selectedStack) return;
+    if (!window.confirm(`Checkout and fast-forward pull trunk '${selectedStack.trunk}'?`)) return;
+    void runSnapshotOperation("Sync stack trunk", () => syncStackTrunk(repo, selectedStack.id));
+  };
+
+  const pushSelectedStack = () => {
+    const repo = requireRepo();
+    if (!repo || !selectedStack) return;
+    void runSnapshotOperation("Push stack", () => pushStack(repo, selectedStack.id));
+  };
+
+  const prepareSelectedStackPrChain = () => {
+    if (!selectedStack) return;
+    const lines = selectedStack.items.map((item) => `${item.branch} -> base ${item.baseBranch}`).join("\n");
+    if (navigator.clipboard) {
+      void navigator.clipboard.writeText(lines).catch(() => undefined);
+    }
+    setOperationLog((log) => [`Prepared PR chain for ${selectedStack.name}`, ...log].slice(0, 8));
+  };
+
+  const reorderSelectedStackBranch = (branch: string, direction: -1 | 1) => {
+    const repo = requireRepo();
+    if (!repo || !selectedStack) return;
+    const names = selectedStack.items.map((item) => item.branch);
+    const index = names.indexOf(branch);
+    const nextIndex = index + direction;
+    if (index === -1 || nextIndex < 0 || nextIndex >= names.length) return;
+    [names[index], names[nextIndex]] = [names[nextIndex], names[index]];
+    void runSnapshotOperation("Reorder stack", () => reorderStack(repo, selectedStack.id, names));
+  };
+
+  const removeSelectedStackBranch = (branch: string) => {
+    const repo = requireRepo();
+    if (!repo || !selectedStack) return;
+    if (!window.confirm(`Remove '${branch}' from '${selectedStack.name}'? This does not delete the branch.`)) return;
+    void runSnapshotOperation("Remove branch from stack", () => removeBranchFromStack(repo, selectedStack.id, branch));
+  };
+
+  const createLaneFromChanges = (changes: FileChange[] = selectedFile ? [selectedFile] : []) => {
+    const repo = requireRepo();
+    if (!repo || !snapshot) return;
+    const paths = [...new Set(changes.map((change) => change.path))];
+    if (paths.length === 0) {
+      setError("Select at least one changed file before creating a parallel lane.");
+      return;
+    }
+    const name = window.prompt("Parallel lane name", laneNameFromPath(paths[0]));
+    if (!name?.trim()) return;
+    const targetBranch = snapshot.currentBranch && !["HEAD", "(detached)"].includes(snapshot.currentBranch) ? snapshot.currentBranch : "main";
+    void runSnapshotOperation("Create parallel lane", () => createLane(repo, name.trim(), targetBranch, paths)).then(() => {
+      setParallelMode(true);
+    });
+  };
+
+  const assignChangeToLane = (change: FileChange) => {
+    const repo = requireRepo();
+    if (!repo || !snapshot) return;
+    if (snapshot.parallelLanes.length === 0) {
+      createLaneFromChanges([change]);
+      return;
+    }
+    const defaultLane = selectedLane ?? snapshot.parallelLanes[0];
+    const laneName = window.prompt(
+      `Assign '${change.path}' to lane`,
+      defaultLane.name
+    );
+    if (!laneName?.trim()) return;
+    const lane = snapshot.parallelLanes.find((item) => item.name === laneName.trim()) ?? defaultLane;
+    void runSnapshotOperation("Assign file to lane", () => assignPathsToLane(repo, lane.id, [change.path]));
+  };
+
+  const applySelectedLane = () => {
+    const repo = requireRepo();
+    if (!repo || !selectedLane) return;
+    void runSnapshotOperation("Apply lane", () => applyLane(repo, selectedLane.id));
+  };
+
+  const unapplySelectedLane = () => {
+    const repo = requireRepo();
+    if (!repo || !selectedLane) return;
+    void runSnapshotOperation("Unapply lane", () => unapplyLane(repo, selectedLane.id));
+  };
+
+  const commitSelectedLane = () => {
+    const repo = requireRepo();
+    if (!repo || !selectedLane) return;
+    const message = window.prompt("Commit message for lane", commitMessage || selectedLane.name);
+    if (!message?.trim()) return;
+    void runSnapshotOperation("Commit lane", () => commitLane(repo, selectedLane.id, message.trim()));
+  };
+
+  const discardSelectedLane = () => {
+    const repo = requireRepo();
+    if (!repo || !selectedLane) return;
+    if (!window.confirm(`Discard lane '${selectedLane.name}'? OpenGit will create a safety snapshot first.`)) return;
+    void runSnapshotOperation("Discard lane", () => discardLane(repo, selectedLane.id));
+  };
+
+  const materializeSelectedLane = () => {
+    const repo = requireRepo();
+    if (!repo || !selectedLane) return;
+    const branchName = window.prompt("Materialize lane as branch", `${selectedLane.targetBranch}-${selectedLane.name}`.replace(/\s+/g, "-"));
+    if (!branchName?.trim()) return;
+    void runSnapshotOperation("Materialize lane branch", () => materializeLaneBranch(repo, selectedLane.id, branchName.trim()));
+  };
+
   const commitChanges = () => {
     const repo = requireRepo();
     if (!repo) return;
@@ -1093,13 +1741,6 @@ export default function App() {
         setPreferencesSection("integrations");
         setPreferencesOpen(true);
         return;
-      }
-      if (runningInTauri) {
-        void getOpenAiStatus()
-          .then((status) => setOpenAiConfigured(status.configured))
-          .catch(() => {
-            setOpenAiConfigured(true);
-          });
       }
     } finally {
       setAiGeneratingCommit(false);
@@ -1222,7 +1863,9 @@ export default function App() {
       return;
     }
     setSelectedCommit(commitItem);
+    setWorktreeSelected(false);
     setSelectedCommitMessage(commitItem.message);
+    setCommitEditorOpen(false);
     setDiffMode("commit");
     setCenterView("graph");
     setDiffExpanded(false);
@@ -1388,6 +2031,7 @@ export default function App() {
           onOpen={(path) => void openRepositoryPath(path)}
           onClose={closeRepoTab}
           onAdd={browseForRepository}
+          onOpenRepositoryManagement={openRepositoryManagement}
           onOpenPalette={() => setPaletteOpen(true)}
         />
 
@@ -1431,6 +2075,9 @@ export default function App() {
             <input value={repoPath} onChange={(event) => setRepoPath(event.target.value)} aria-label="Repository path" />
             <IconButton label="Browse for repository" onClick={browseForRepository} disabled={loading}>
               <FolderOpen size={16} />
+            </IconButton>
+            <IconButton label="Repository Management" onClick={openRepositoryManagement} disabled={loading}>
+              <Cloud size={16} />
             </IconButton>
             <Button variant="primary" onClick={openCurrentPath} disabled={loading}>
               Open
@@ -1536,6 +2183,7 @@ export default function App() {
         <div
           className={clsx(
             "content-grid",
+            !hasWorkingChanges && "no-working-changes",
             centerView === "diff" && diffExpanded && "diff-expanded",
             layout.sidebarCollapsed && "sidebar-collapsed",
             layout.detailCollapsed && "detail-collapsed",
@@ -1557,6 +2205,17 @@ export default function App() {
             stashCurrent={stashCurrent}
             generateBranchName={() => void generateBranchName()}
             aiGeneratingBranch={aiGeneratingBranch}
+            selectedBranchRef={selectedBranchRef}
+            branchInspection={branchInspection}
+            branchInspectionLoading={branchInspectionLoading}
+            branchInspectionError={branchInspectionError}
+            selectBranch={selectBranchForInspection}
+            checkoutInspectedBranch={checkoutInspectedBranch}
+            fetchForInspectedBranch={fetchForInspectedBranch}
+            pullInspectedBranch={pullInspectedBranch}
+            pushInspectedBranch={pushInspectedBranch}
+            openInspectorBranchMenu={openInspectorBranchMenu}
+            selectCommitBySha={selectCommitBySha}
             deleteBranch={(name) => {
               const repo = requireRepo();
               if (repo && window.confirm(`Delete branch '${name}'?`)) {
@@ -1575,6 +2234,26 @@ export default function App() {
             }}
             openBranchMenu={openBranchMenu}
             startResize={startResize}
+            selectedStackId={selectedStackId}
+            selectedLaneId={selectedLaneId}
+            parallelMode={parallelMode}
+            setSelectedStackId={setSelectedStackId}
+            setSelectedLaneId={setSelectedLaneId}
+            setParallelMode={setParallelMode}
+            createStackFromBranch={() => createStackFromBranch()}
+            addBranchToSelectedStack={() => addBranchToSelectedStack()}
+            createChildBranchForStack={() => createChildBranchForStack()}
+            restackSelectedStack={restackSelectedStack}
+            syncSelectedStackTrunk={syncSelectedStackTrunk}
+            pushSelectedStack={pushSelectedStack}
+            prepareSelectedStackPrChain={prepareSelectedStackPrChain}
+            reorderSelectedStackBranch={reorderSelectedStackBranch}
+            removeSelectedStackBranch={removeSelectedStackBranch}
+            applySelectedLane={applySelectedLane}
+            unapplySelectedLane={unapplySelectedLane}
+            commitSelectedLane={commitSelectedLane}
+            discardSelectedLane={discardSelectedLane}
+            materializeSelectedLane={materializeSelectedLane}
           />
 
           <ResizeHandle
@@ -1680,7 +2359,8 @@ export default function App() {
             ) : snapshot && (snapshot.commits.length > 0 || snapshot.changes.length > 0) ? (
               <CommitGraphTable
                 rows={graphRows}
-                selectedSha={selectedCommit?.sha}
+                selectedSha={worktreeSelected ? undefined : selectedCommit?.sha}
+                wipSelected={worktreeSelected}
                 snapshot={snapshot}
                 commitMessage={commitMessage}
                 setCommitMessage={setCommitMessage}
@@ -1690,16 +2370,29 @@ export default function App() {
                 types={historyTypes}
                 stagedCount={stagedChanges.length}
                 unstagedCount={unstagedChanges.length}
+                selectedStack={selectedStack}
                 onColumnResizeStart={startHistoryColumnResize}
                 onFilterChange={(next) => setHistoryFilters((current) => ({ ...current, ...next }))}
                 onOpenBranchMenu={openBranchMenu}
+                onSelectBranch={selectBranchForInspection}
                 onOpenCommitMenu={(commitItem, event) => {
                   openBranchMenu(targetFromCommit(commitItem, snapshot), event);
                 }}
                 onSelect={(commitItem) => {
                   setSelectedCommit(commitItem);
+                  setWorktreeSelected(false);
                   setSelectedCommitMessage(commitItem.message);
+                  setCommitEditorOpen(false);
                   setDiffMode("commit");
+                  setCenterView("graph");
+                  setDiffExpanded(false);
+                }}
+                onSelectWorktree={() => {
+                  setWorktreeSelected(true);
+                  setSelectedFile(snapshot.changes[0] ?? null);
+                  setSelectedCommitFile(null);
+                  setCommitEditorOpen(false);
+                  setDiffMode("working");
                   setCenterView("graph");
                   setDiffExpanded(false);
                 }}
@@ -1726,15 +2419,45 @@ export default function App() {
           />
 
           <aside className="detail-stack">
-            <Panel title="Commit Detail" className="selection-panel" actions={<GitCommitHorizontal size={15} />}>
-              <CommitDetail
-                commit={selectedCommit}
-                files={commitFiles}
-                filesLoading={commitFilesLoading}
-                fileError={commitFileError}
-                onSelectParent={selectCommitBySha}
-                onSelectFile={openCommitDiff}
-              />
+            <Panel
+              title={selectedStack ? "Stack Detail" : worktreeSelected ? "Working Directory" : "Commit Detail"}
+              className="selection-panel"
+              actions={selectedStack ? <GitFork size={15} /> : worktreeSelected ? <ClipboardList size={15} /> : <GitCommitHorizontal size={15} />}
+            >
+              {selectedStack ? (
+                <StackDetail
+                  stack={selectedStack}
+                  onRestack={restackSelectedStack}
+                  onSync={syncSelectedStackTrunk}
+                  onPush={pushSelectedStack}
+                  onPrPlan={prepareSelectedStackPrChain}
+                  onRemove={removeSelectedStackBranch}
+                />
+              ) : worktreeSelected && snapshot ? (
+                <WorktreeDetail
+                  snapshot={snapshot}
+                  stagedCount={stagedChanges.length}
+                  unstagedCount={unstagedChanges.length}
+                  selectedFile={selectedFile}
+                  onSelectFile={openWorkingDiff}
+                />
+              ) : (
+                <CommitDetail
+                  commit={selectedCommit}
+                  selectedCommitMessage={selectedCommitMessage}
+                  setSelectedCommitMessage={setSelectedCommitMessage}
+                  commitEditorOpen={commitEditorOpen}
+                  setCommitEditorOpen={setCommitEditorOpen}
+                  selectedCommitIsHead={selectedCommitIsHead}
+                  stagedChanges={stagedChanges}
+                  workingChangeCount={snapshot?.changes.length ?? 0}
+                  loading={loading}
+                  onSelectParent={selectCommitBySha}
+                  onUpdateMessage={updateSelectedCommitMessage}
+                  onUndoLastCommit={undoLastCommitAction}
+                  onSquashLastCommits={squashLastCommitsAction}
+                />
+              )}
             </Panel>
             <ResizeHandle
               className="detail-stack-resize"
@@ -1743,13 +2466,47 @@ export default function App() {
               onPointerDown={(event) => startResize("detailSelection", event)}
             />
 
-            <Panel title={`Changed Files (${commitFiles.length})`} className="changed-files-panel" actions={<FileText size={15} />}>
-              <CommitFileList
-                files={commitFiles}
-                selected={selectedCommitFile}
-                loading={commitFilesLoading}
-                error={commitFileError}
-                onSelect={openCommitDiff}
+            <Panel title={inspectorFileTitle} className="changed-files-panel" actions={<FileText size={15} />}>
+              {worktreeSelected ? (
+                <WorktreeChangeList
+                  changes={snapshot?.changes ?? []}
+                  selected={selectedFile}
+                  onSelect={openWorkingDiff}
+                />
+              ) : (
+                <CommitFileList
+                  files={commitFiles}
+                  selected={selectedCommitFile}
+                  loading={commitFilesLoading}
+                  error={commitFileError}
+                  onSelect={openCommitDiff}
+                />
+              )}
+            </Panel>
+
+            <Panel
+              title="Commit"
+              className="right-commit-panel"
+              defaultCollapsed={!snapshot || !hasWorkingChanges}
+              actions={<SquarePen size={15} />}
+            >
+              <CommitComposer
+                snapshot={snapshot}
+                stagedChanges={stagedChanges}
+                commitMessage={commitMessage}
+                setCommitMessage={setCommitMessage}
+                amend={amend}
+                setAmend={setAmend}
+                loading={loading}
+                aiGeneratingBranch={aiGeneratingBranch}
+                aiGeneratingCommit={aiGeneratingCommit}
+                aiGeneratingPr={aiGeneratingPr}
+                aiPrDraft={aiPrDraft}
+                generateBranchName={() => void generateBranchName()}
+                generateCommitMessage={() => void generateCommitMessage()}
+                generatePrDescription={() => void generatePrDescription()}
+                copyPrDraft={() => void copyPrDraft()}
+                commitChanges={commitChanges}
               />
             </Panel>
           </aside>
@@ -1762,41 +2519,78 @@ export default function App() {
           />
 
           <section className="bottom-area">
-            <Panel title={`Changes (${snapshot?.changes.length ?? 0})`} className="changes-panel" actions={<ClipboardList size={15} />}>
+            <Panel
+              title={`Changes (${snapshot?.changes.length ?? 0})`}
+              className="changes-panel"
+              actions={
+                <span className="panel-action-group">
+                  <IconButton
+                    label={parallelMode ? "Hide parallel lane controls" : "Show parallel lane controls"}
+                    className={clsx(parallelMode && "active")}
+                    onClick={() => setParallelMode((value) => !value)}
+                    disabled={!snapshot}
+                  >
+                    <Shuffle size={14} />
+                  </IconButton>
+                  <ClipboardList size={15} />
+                </span>
+              }
+            >
               {snapshot ? (
-                <div className="changes-grid">
-                  <ChangeColumn
-                    title={`Unstaged (${unstagedChanges.length})`}
-                    changes={unstagedChanges}
-                    selected={selectedFile}
-                    onSelect={openWorkingDiff}
-                    bulkAction={() => batchFileAction("Stage all", unstagedChanges, stagePaths)}
-                    bulkDisabled={loading || unstagedChanges.length === 0}
-                    bulkLabel="Stage All"
-                    primaryAction={(change) => fileAction("Stage", change, stagePaths)}
-                    primaryLabel="Stage"
-                    secondaryAction={(change) => {
-                      if (window.confirm(`Discard '${change.path}'?`)) {
-                        fileAction("Discard", change, discardPaths);
-                      }
-                    }}
-                  />
-                  <ChangeColumn
-                    title={`Staged (${stagedChanges.length})`}
-                    changes={stagedChanges}
-                    selected={selectedFile}
-                    onSelect={openWorkingDiff}
-                    bulkAction={() => batchFileAction("Unstage all", stagedChanges, unstagePaths)}
-                    bulkDisabled={loading || stagedChanges.length === 0}
-                    bulkLabel="Unstage All"
-                    primaryAction={(change) => fileAction("Unstage", change, unstagePaths)}
-                    primaryLabel="Unstage"
-                    secondaryAction={(change) => {
-                      if (window.confirm(`Discard '${change.path}'?`)) {
-                        fileAction("Discard", change, discardPaths);
-                      }
-                    }}
-                  />
+                <div className={clsx("changes-workflow", (parallelMode || snapshot.parallelLanes.length > 0) && "parallel-visible", parallelMode && "parallel-active")}>
+                  {(parallelMode || snapshot.parallelLanes.length > 0) && (
+                    <ParallelLaneBar
+                      lanes={snapshot.parallelLanes}
+                      selectedLaneId={selectedLaneId}
+                      parallelMode={parallelMode}
+                      onSelectLane={setSelectedLaneId}
+                      onToggleParallel={() => setParallelMode((value) => !value)}
+                      onCreateLane={() => createLaneFromChanges(selectedFile ? [selectedFile] : unstagedChanges.slice(0, 1))}
+                      onApply={applySelectedLane}
+                      onUnapply={unapplySelectedLane}
+                      onCommit={commitSelectedLane}
+                    />
+                  )}
+                  <div className="changes-grid">
+                    <ChangeColumn
+                      title={`Unstaged (${laneFilteredUnstagedChanges.length})`}
+                      changes={laneFilteredUnstagedChanges}
+                      selected={selectedFile}
+                      onSelect={openWorkingDiff}
+                      bulkAction={() => batchFileAction("Stage all", laneFilteredUnstagedChanges, stagePaths)}
+                      bulkDisabled={loading || laneFilteredUnstagedChanges.length === 0}
+                      bulkLabel="Stage All"
+                      primaryAction={(change) => fileAction("Stage", change, stagePaths)}
+                      primaryLabel="Stage"
+                      secondaryAction={(change) => {
+                        if (window.confirm(`Discard '${change.path}'?`)) {
+                          fileAction("Discard", change, discardPaths);
+                        }
+                      }}
+                      laneForChange={(change) => (parallelMode || snapshot.parallelLanes.length > 0 ? laneByPath.get(change.path) : undefined)}
+                      assignLane={parallelMode ? assignChangeToLane : undefined}
+                      createLaneFromChange={parallelMode ? (change) => createLaneFromChanges([change]) : undefined}
+                    />
+                    <ChangeColumn
+                      title={`Staged (${laneFilteredStagedChanges.length})`}
+                      changes={laneFilteredStagedChanges}
+                      selected={selectedFile}
+                      onSelect={openWorkingDiff}
+                      bulkAction={() => batchFileAction("Unstage all", laneFilteredStagedChanges, unstagePaths)}
+                      bulkDisabled={loading || laneFilteredStagedChanges.length === 0}
+                      bulkLabel="Unstage All"
+                      primaryAction={(change) => fileAction("Unstage", change, unstagePaths)}
+                      primaryLabel="Unstage"
+                      secondaryAction={(change) => {
+                        if (window.confirm(`Discard '${change.path}'?`)) {
+                          fileAction("Discard", change, discardPaths);
+                        }
+                      }}
+                      laneForChange={(change) => (parallelMode || snapshot.parallelLanes.length > 0 ? laneByPath.get(change.path) : undefined)}
+                      assignLane={parallelMode ? assignChangeToLane : undefined}
+                      createLaneFromChange={parallelMode ? (change) => createLaneFromChanges([change]) : undefined}
+                    />
+                  </div>
                 </div>
               ) : (
                 <EmptyState>
@@ -1806,116 +2600,13 @@ export default function App() {
               )}
             </Panel>
             <ResizeHandle
-              className="bottom-commit-resize"
-              label="Resize commit section"
-              orientation="vertical"
-              onPointerDown={(event) => startResize("bottomCommit", event)}
-            />
-
-            <Panel title="Commit" className="commit-panel" actions={<SquarePen size={15} />}>
-              <div className="commit-box">
-                {selectedCommit && (
-                  <div className="selected-commit-editor">
-                    <div>
-                      <strong>Selected commit</strong>
-                      <span>{shortSha(selectedCommit.sha)} · {selectedCommit.author}</span>
-                    </div>
-                    <textarea
-                      value={selectedCommitMessage}
-                      onChange={(event) => setSelectedCommitMessage(event.target.value)}
-                      placeholder="Selected commit message"
-                      aria-label="Selected commit message"
-                    />
-                    <Button
-                      variant="secondary"
-                      disabled={
-                        loading ||
-                        (selectedCommitIsHead ? stagedChanges.length > 0 : (snapshot?.changes.length ?? 0) > 0) ||
-                        !selectedCommitMessage.trim() ||
-                        selectedCommitMessage.trim() === selectedCommit.message
-                      }
-                      onClick={updateSelectedCommitMessage}
-                    >
-                      Update Message
-                    </Button>
-                    {!selectedCommitIsHead && (snapshot?.changes.length ?? 0) === 0 && (
-                      <small>Older commit edits rewrite linear local history after creating a safety snapshot.</small>
-                    )}
-                    {!selectedCommitIsHead && (snapshot?.changes.length ?? 0) > 0 && <small>Clean the working tree before rewording older commits.</small>}
-                    {selectedCommitIsHead && stagedChanges.length > 0 && <small>Unstage files before amending the HEAD message.</small>}
-                    <div className="commit-edit-actions">
-                      <Button variant="secondary" disabled={!snapshot || loading} onClick={undoLastCommitAction}>
-                        Undo Last Commit
-                      </Button>
-                      <Button variant="secondary" disabled={!snapshot || loading || (snapshot?.commits.length ?? 0) < 2} onClick={squashLastCommitsAction}>
-                        Squash Last 2
-                      </Button>
-                    </div>
-                  </div>
-                )}
-                <div className="ai-assist-row">
-                  <Button
-                    variant="secondary"
-                    disabled={!snapshot || loading || aiGeneratingBranch}
-                    onClick={() => void generateBranchName()}
-                  >
-                    <Sparkles size={13} />
-                    {aiGeneratingBranch ? "Naming" : "Branch Name"}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    disabled={!snapshot || loading || aiGeneratingPr}
-                    onClick={() => void generatePrDescription()}
-                  >
-                    <FileText size={13} />
-                    {aiGeneratingPr ? "Drafting" : "PR Text"}
-                  </Button>
-                </div>
-                {aiPrDraft && (
-                  <div className="ai-pr-draft">
-                    <div>
-                      <strong>{aiPrDraft.title}</strong>
-                      <IconButton label="Copy PR draft" onClick={() => void copyPrDraft()}>
-                        <ClipboardList size={13} />
-                      </IconButton>
-                    </div>
-                    <pre>{aiPrDraft.description}</pre>
-                  </div>
-                )}
-                <textarea
-                  value={commitMessage}
-                  onChange={(event) => setCommitMessage(event.target.value)}
-                  placeholder="Commit message"
-                  aria-label="Commit message"
-                />
-                <label className="check-row">
-                  <input type="checkbox" checked={amend} onChange={(event) => setAmend(event.target.checked)} />
-                  Amend
-                </label>
-                <div className="commit-footer">
-                  <Button
-                    className="ai-generate-button"
-                    variant="secondary"
-                    disabled={!snapshot || loading || aiGeneratingCommit || stagedChanges.length === 0}
-                    onClick={() => void generateCommitMessage()}
-                  >
-                    <Sparkles size={13} />
-                    {aiGeneratingCommit ? "Generating" : "Generate Message"}
-                  </Button>
-                  <Button className="commit-submit-button" variant="primary" disabled={!snapshot || loading || !commitMessage.trim()} onClick={commitChanges}>
-                    Commit
-                  </Button>
-                </div>
-              </div>
-            </Panel>
-            <ResizeHandle
               className="bottom-operations-resize"
               label="Resize operations section"
               orientation="vertical"
               onPointerDown={(event) => startResize("bottomOperations", event)}
             />
 
-            <Panel title="Activity" className="operations-panel" actions={<Activity size={15} />}>
+            <Panel title="Activity" className="operations-panel" defaultCollapsed actions={<Activity size={15} />}>
               <ActivityPanel
                 snapshots={snapshot?.undoSnapshots ?? []}
                 operationLog={operationLog}
@@ -1942,12 +2633,21 @@ export default function App() {
           commands={[
             ["Open repository", openCurrentPath],
             ["Browse for repository", browseForRepository],
+            ["Repository Management", openRepositoryManagement],
             ["Preferences", () => setPreferencesOpen(true)],
             ["Refresh", refresh],
             ["Stage all changes", () => batchFileAction("Stage all", unstagedChanges, stagePaths)],
             ["Unstage all changes", () => batchFileAction("Unstage all", stagedChanges, unstagePaths)],
             ["Generate branch name", () => void generateBranchName()],
             ["Generate PR text", () => void generatePrDescription()],
+            ["Create stack", () => createStackFromBranch()],
+            ["Add branch to stack", () => addBranchToSelectedStack()],
+            ["Restack current stack", restackSelectedStack],
+            ["Create parallel lane", () => createLaneFromChanges(selectedFile ? [selectedFile] : unstagedChanges.slice(0, 1))],
+            ["Assign selected file to lane", () => selectedFile && assignChangeToLane(selectedFile)],
+            ["Apply lane", applySelectedLane],
+            ["Unapply lane", unapplySelectedLane],
+            ["Commit lane", commitSelectedLane],
             ["Undo last commit", undoLastCommitAction],
             ["Squash last two commits", squashLastCommitsAction],
             ["Fetch", () => snapshot && runSnapshotOperation("Fetch", () => fetchRepo(snapshot.repository.path))],
@@ -1978,6 +2678,34 @@ export default function App() {
           azureDevOpsConfigured={azureDevOpsConfigured}
           setAzureDevOpsConfigured={setAzureDevOpsConfigured}
           preferredIntegration={preferredIntegration}
+          openRepositoryManagement={openRepositoryManagement}
+        />
+      )}
+      {repositoryManagementOpen && (
+        <RepositoryManagementPanel
+          close={() => setRepositoryManagementOpen(false)}
+          runningInTauri={runningInTauri}
+          azureDevOpsConfigured={azureDevOpsConfigured}
+          providerAccounts={providerAccounts}
+          catalog={providerCatalog}
+          repositories={providerRepositories}
+          groups={providerRepositoryGroups}
+          projectNames={providerProjectNames}
+          filters={providerFilters}
+          setFilters={setProviderFilters}
+          loading={providerLoading}
+          error={providerError}
+          cloneRoot={cloneRoot}
+          chooseCloneRoot={chooseDefaultCloneRoot}
+          refresh={() => void refreshProviderRepositories()}
+          openIntegrations={() => {
+            setPreferredIntegration("Azure DevOps");
+            setPreferencesSection("integrations");
+            setPreferencesOpen(true);
+          }}
+          cloneRepository={cloneProviderRepository}
+          openRepository={openProviderRepository}
+          locateRepository={(repo) => void locateProviderRepository(repo)}
         />
       )}
     </main>
@@ -1991,6 +2719,7 @@ function RepoTabStrip({
   onOpen,
   onClose,
   onAdd,
+  onOpenRepositoryManagement,
   onOpenPalette
 }: {
   tabs: string[];
@@ -1999,6 +2728,7 @@ function RepoTabStrip({
   onOpen: (path: string) => void;
   onClose: (path: string) => void;
   onAdd: () => void;
+  onOpenRepositoryManagement: () => void;
   onOpenPalette: () => void;
 }) {
   return (
@@ -2006,6 +2736,9 @@ function RepoTabStrip({
       <div className="repo-tabbar-actions">
         <IconButton label="Open repository" onClick={onAdd} disabled={loading}>
           <FolderOpen size={15} />
+        </IconButton>
+        <IconButton label="Repository Management" onClick={onOpenRepositoryManagement} disabled={loading}>
+          <Cloud size={15} />
         </IconButton>
         <IconButton label="Command palette" onClick={onOpenPalette}>
           <Terminal size={15} />
@@ -2165,6 +2898,103 @@ function ResizeHandle({
   );
 }
 
+function CommitComposer({
+  snapshot,
+  stagedChanges,
+  commitMessage,
+  setCommitMessage,
+  amend,
+  setAmend,
+  loading,
+  aiGeneratingBranch,
+  aiGeneratingCommit,
+  aiGeneratingPr,
+  aiPrDraft,
+  generateBranchName,
+  generateCommitMessage,
+  generatePrDescription,
+  copyPrDraft,
+  commitChanges
+}: {
+  snapshot: RepoSnapshot | null;
+  stagedChanges: FileChange[];
+  commitMessage: string;
+  setCommitMessage: (value: string) => void;
+  amend: boolean;
+  setAmend: (value: boolean) => void;
+  loading: boolean;
+  aiGeneratingBranch: boolean;
+  aiGeneratingCommit: boolean;
+  aiGeneratingPr: boolean;
+  aiPrDraft: AiPrDescriptionSuggestion | null;
+  generateBranchName: () => void;
+  generateCommitMessage: () => void;
+  generatePrDescription: () => void;
+  copyPrDraft: () => void;
+  commitChanges: () => void;
+}) {
+  return (
+    <div className="commit-box">
+      <textarea
+        value={commitMessage}
+        onChange={(event) => setCommitMessage(event.target.value)}
+        placeholder="Commit message"
+        aria-label="Commit message"
+      />
+      <label className="check-row">
+        <input type="checkbox" checked={amend} onChange={(event) => setAmend(event.target.checked)} />
+        Amend
+      </label>
+      <details className="commit-more-tools">
+        <summary>AI tools</summary>
+        <div className="ai-assist-row">
+          <Button
+            variant="secondary"
+            disabled={!snapshot || loading || aiGeneratingBranch}
+            onClick={generateBranchName}
+          >
+            <Sparkles size={13} />
+            {aiGeneratingBranch ? "Naming" : "Branch Name"}
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={!snapshot || loading || aiGeneratingPr}
+            onClick={generatePrDescription}
+          >
+            <FileText size={13} />
+            {aiGeneratingPr ? "Drafting" : "PR Text"}
+          </Button>
+        </div>
+        {aiPrDraft && (
+          <div className="ai-pr-draft">
+            <div>
+              <strong>{aiPrDraft.title}</strong>
+              <IconButton label="Copy PR draft" onClick={copyPrDraft}>
+                <ClipboardList size={13} />
+              </IconButton>
+            </div>
+            <pre>{aiPrDraft.description}</pre>
+          </div>
+        )}
+      </details>
+      <div className="commit-footer">
+        <Button
+          className="ai-generate-button"
+          variant="secondary"
+          disabled={!snapshot || loading || aiGeneratingCommit || stagedChanges.length === 0}
+          onClick={generateCommitMessage}
+        >
+          <Sparkles size={13} />
+          {aiGeneratingCommit ? "Generating" : "Generate Message"}
+        </Button>
+        <Button className="commit-submit-button" variant="primary" disabled={!snapshot || loading || !commitMessage.trim()} onClick={commitChanges}>
+          Commit
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function Sidebar({
   snapshot,
   sidebarBranchFilter,
@@ -2179,11 +3009,42 @@ function Sidebar({
   stashCurrent,
   generateBranchName,
   aiGeneratingBranch,
+  selectedBranchRef,
+  branchInspection,
+  branchInspectionLoading,
+  branchInspectionError,
+  selectBranch,
+  checkoutInspectedBranch,
+  fetchForInspectedBranch,
+  pullInspectedBranch,
+  pushInspectedBranch,
+  openInspectorBranchMenu,
+  selectCommitBySha,
   deleteBranch,
   applyStash,
   dropStash,
   openBranchMenu,
-  startResize
+  startResize,
+  selectedStackId,
+  selectedLaneId,
+  parallelMode,
+  setSelectedStackId,
+  setSelectedLaneId,
+  setParallelMode,
+  createStackFromBranch,
+  addBranchToSelectedStack,
+  createChildBranchForStack,
+  restackSelectedStack,
+  syncSelectedStackTrunk,
+  pushSelectedStack,
+  prepareSelectedStackPrChain,
+  reorderSelectedStackBranch,
+  removeSelectedStackBranch,
+  applySelectedLane,
+  unapplySelectedLane,
+  commitSelectedLane,
+  discardSelectedLane,
+  materializeSelectedLane
 }: {
   snapshot: RepoSnapshot | null;
   sidebarBranchFilter: string;
@@ -2198,13 +3059,48 @@ function Sidebar({
   stashCurrent: () => void;
   generateBranchName: () => void;
   aiGeneratingBranch: boolean;
+  selectedBranchRef: string | null;
+  branchInspection: BranchInspection | null;
+  branchInspectionLoading: boolean;
+  branchInspectionError: string | null;
+  selectBranch: (target: BranchMenuTarget | DisplayBranch | Branch) => void;
+  checkoutInspectedBranch: (inspection: BranchInspection) => void;
+  fetchForInspectedBranch: () => void;
+  pullInspectedBranch: (inspection: BranchInspection) => void;
+  pushInspectedBranch: (inspection: BranchInspection) => void;
+  openInspectorBranchMenu: (inspection: BranchInspection, event: ReactMouseEvent<HTMLElement>) => void;
+  selectCommitBySha: (sha: string) => void;
   deleteBranch: (name: string) => void;
   applyStash: (stash: string) => void;
   dropStash: (stash: string) => void;
   openBranchMenu: (target: BranchMenuTarget, event: ReactMouseEvent<HTMLElement>) => void;
   startResize: (target: ResizeTarget, event: ReactPointerEvent) => void;
+  selectedStackId: string | null;
+  selectedLaneId: string | null;
+  parallelMode: boolean;
+  setSelectedStackId: (id: string | null) => void;
+  setSelectedLaneId: (id: string | null) => void;
+  setParallelMode: (value: boolean | ((current: boolean) => boolean)) => void;
+  createStackFromBranch: () => void;
+  addBranchToSelectedStack: () => void;
+  createChildBranchForStack: () => void;
+  restackSelectedStack: () => void;
+  syncSelectedStackTrunk: () => void;
+  pushSelectedStack: () => void;
+  prepareSelectedStackPrChain: () => void;
+  reorderSelectedStackBranch: (branch: string, direction: -1 | 1) => void;
+  removeSelectedStackBranch: (branch: string) => void;
+  applySelectedLane: () => void;
+  unapplySelectedLane: () => void;
+  commitSelectedLane: () => void;
+  discardSelectedLane: () => void;
+  materializeSelectedLane: () => void;
 }) {
   const branchRows = snapshot ? filterBranches(displayBranches(snapshot), sidebarBranchFilter) : [];
+  const selectedStack = snapshot?.branchStacks.find((stack) => stack.id === selectedStackId) ?? null;
+  const selectedLane = snapshot?.parallelLanes.find((lane) => lane.id === selectedLaneId) ?? null;
+  const localBranches = branchRows.filter((branch) => !branch.isRemote);
+  const remoteBranches = branchRows.filter((branch) => branch.isRemote);
 
   return (
     <aside className="sidebar">
@@ -2233,25 +3129,24 @@ function Sidebar({
         <div className="nav-list">
           {snapshot ? (
             branchRows.length > 0 ? (
-              branchRows.map((branch) => (
-                <div key={branch.fullRef} className={clsx("nav-row", branch.isCurrent && "active")}>
-                  <button
-                    onClick={(event) => openBranchMenu(targetFromBranch(branch, "sidebar"), event)}
-                    aria-haspopup="menu"
-                    disabled={branch.isUnborn}
-                  >
-                    <ChevronRight size={13} />
-                    <span>{branch.name}</span>
-                    {branch.isUnborn && <small>unborn</small>}
-                    {branch.isRemote && <small>remote</small>}
-                  </button>
-                  {!branch.isProtected && !branch.isCurrent && !branch.isUnborn && !branch.isRemote && (
-                    <IconButton label="Delete branch" onClick={() => deleteBranch(branch.name)}>
-                      <Trash2 size={13} />
-                    </IconButton>
-                  )}
-                </div>
-              ))
+              <>
+                <BranchGroup
+                  title="Local"
+                  branches={localBranches}
+                  selectedBranchRef={selectedBranchRef}
+                  selectBranch={selectBranch}
+                  openBranchMenu={openBranchMenu}
+                  deleteBranch={deleteBranch}
+                />
+                <BranchGroup
+                  title="Remote"
+                  branches={remoteBranches}
+                  selectedBranchRef={selectedBranchRef}
+                  selectBranch={selectBranch}
+                  openBranchMenu={openBranchMenu}
+                  deleteBranch={deleteBranch}
+                />
+              </>
             ) : (
               <EmptyState>
                 <GitBranch size={24} />
@@ -2267,13 +3162,129 @@ function Sidebar({
         </div>
       </Panel>
       <ResizeHandle
-        className="sidebar-section-resize"
+        className="sidebar-section-resize sidebar-branches-resize"
         label="Resize branches section"
         orientation="horizontal"
         onPointerDown={(event) => startResize("sidebarBranches", event)}
       />
 
-      <Panel title="Remotes" className="sidebar-remotes-panel" actions={<Boxes size={15} />}>
+      <Panel title="Branch Inspector" className="branch-inspector-panel" actions={<GitBranch size={15} />}>
+        <BranchInspector
+          inspection={branchInspection}
+          selectedBranchRef={selectedBranchRef}
+          loading={branchInspectionLoading}
+          error={branchInspectionError}
+          hasWorkingChanges={(snapshot?.changes.length ?? 0) > 0}
+          onCheckout={checkoutInspectedBranch}
+          onFetch={fetchForInspectedBranch}
+          onPull={pullInspectedBranch}
+          onPush={pushInspectedBranch}
+          onMore={openInspectorBranchMenu}
+          onSelectCommit={selectCommitBySha}
+        />
+      </Panel>
+
+      <Panel
+        title="Workflows"
+        className="sidebar-workflows-panel"
+        defaultCollapsed
+        actions={<GitFork size={15} />}
+      >
+        <div className="workflow-launcher">
+          <div className="workflow-launcher-actions">
+            <Button variant="secondary" onClick={createStackFromBranch} disabled={!snapshot}>Create Stack</Button>
+            <Button variant="secondary" onClick={() => setParallelMode((current) => !current)} disabled={!snapshot}>
+              {parallelMode ? "Hide Lanes" : "Show Lanes"}
+            </Button>
+          </div>
+          {snapshot?.branchStacks.length ? (
+            <div className="stack-list">
+              {snapshot.branchStacks.map((stack) => (
+                <div key={stack.id} className={clsx("stack-card", selectedStackId === stack.id && "active")}>
+                  <button type="button" className="stack-card-header" onClick={() => setSelectedStackId(stack.id)}>
+                    <GitFork size={14} />
+                    <span>
+                      <strong>{stack.name}</strong>
+                      <small>{stack.trunk} · {stack.items.length} branch{stack.items.length === 1 ? "" : "es"}</small>
+                    </span>
+                    <em className={clsx("workflow-status", stack.status)}>{stack.status}</em>
+                  </button>
+                  {selectedStackId === stack.id && (
+                    <div className="stack-tree">
+                      <div className="stack-tree-row trunk">
+                        <span>{stack.trunk}</span>
+                        <small>trunk</small>
+                      </div>
+                      {stack.items.map((item) => (
+                        <div key={item.id} className="stack-tree-row">
+                          <span>{item.branch}</span>
+                          <small>{item.status}</small>
+                          <div>
+                            <IconButton label="Move branch up" onClick={() => reorderSelectedStackBranch(item.branch, -1)}>
+                              <ArrowDownToLine className="rotate-up" size={12} />
+                            </IconButton>
+                            <IconButton label="Move branch down" onClick={() => reorderSelectedStackBranch(item.branch, 1)}>
+                              <ArrowDownToLine size={12} />
+                            </IconButton>
+                            <IconButton label="Remove from stack" onClick={() => removeSelectedStackBranch(item.branch)}>
+                              <X size={12} />
+                            </IconButton>
+                          </div>
+                        </div>
+                      ))}
+                      <div className="stack-actions">
+                        <Button variant="ghost" onClick={createChildBranchForStack}>Child</Button>
+                        <Button variant="ghost" onClick={restackSelectedStack}>Restack</Button>
+                        <Button variant="ghost" onClick={syncSelectedStackTrunk}>Sync</Button>
+                        <Button variant="ghost" onClick={pushSelectedStack}>Push</Button>
+                        <Button variant="ghost" onClick={prepareSelectedStackPrChain}>PR Chain</Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="workflow-empty">No stacks yet. Create one from the current branch when you need a branch chain.</p>
+          )}
+          {selectedStack && (
+            <Button className="stack-wide-action" variant="secondary" onClick={addBranchToSelectedStack}>
+              Add current branch to {selectedStack.name}
+            </Button>
+          )}
+          {snapshot?.parallelLanes.length ? (
+            <div className="lane-list">
+              {snapshot.parallelLanes.map((lane) => (
+                <button
+                  key={lane.id}
+                  type="button"
+                  className={clsx("lane-card", selectedLaneId === lane.id && "active")}
+                  onClick={() => setSelectedLaneId(lane.id)}
+                >
+                  <span>
+                    <strong>{lane.name}</strong>
+                    <small>{lane.targetBranch} · {lane.paths.length} file{lane.paths.length === 1 ? "" : "s"}</small>
+                  </span>
+                  <em className={clsx("workflow-status", lane.status)}>{lane.applied ? "applied" : lane.status}</em>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="workflow-empty">No parallel lanes. Turn on lanes in Changes when you want file-level patch lanes.</p>
+          )}
+          {selectedLane && (
+            <div className="lane-actions">
+              <Button variant="ghost" onClick={applySelectedLane} disabled={selectedLane.applied}>Apply</Button>
+              <Button variant="ghost" onClick={unapplySelectedLane} disabled={!selectedLane.applied}>Unapply</Button>
+              <Button variant="ghost" onClick={commitSelectedLane}>Commit</Button>
+              <Button variant="ghost" onClick={materializeSelectedLane}>Branch</Button>
+              <Button variant="danger" onClick={discardSelectedLane}>Discard</Button>
+            </div>
+          )}
+        </div>
+      </Panel>
+
+      <Panel title="Remotes" className="sidebar-remotes-panel" defaultCollapsed actions={<Boxes size={15} />}>
         <div className="remote-create">
           <input value={remoteName} onChange={(event) => setRemoteName(event.target.value)} aria-label="Remote name" />
           <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} aria-label="Remote URL" placeholder="git@github.com:owner/repo.git" />
@@ -2298,13 +3309,13 @@ function Sidebar({
         </div>
       </Panel>
       <ResizeHandle
-        className="sidebar-section-resize"
+        className="sidebar-section-resize sidebar-remotes-resize"
         label="Resize remotes section"
         orientation="horizontal"
         onPointerDown={(event) => startResize("sidebarRemotes", event)}
       />
 
-      <Panel title="Stashes" className="sidebar-stashes-panel" actions={<PackageOpen size={15} />}>
+      <Panel title="Stashes" className="sidebar-stashes-panel" defaultCollapsed={!snapshot || snapshot.stashes.length === 0} actions={<PackageOpen size={15} />}>
         <div className="inline-create">
           <input value={stashMessage} onChange={(event) => setStashMessage(event.target.value)} aria-label="Stash message" />
           <IconButton label="Create stash" onClick={stashCurrent}>
@@ -2333,13 +3344,13 @@ function Sidebar({
         </div>
       </Panel>
       <ResizeHandle
-        className="sidebar-section-resize"
+        className="sidebar-section-resize sidebar-stashes-resize"
         label="Resize stashes section"
         orientation="horizontal"
         onPointerDown={(event) => startResize("sidebarStashes", event)}
       />
 
-      <Panel title="Pull Requests" className="sidebar-pull-requests-panel" actions={<GitPullRequest size={15} />}>
+      <Panel title="Pull Requests" className="sidebar-pull-requests-panel" defaultCollapsed actions={<GitPullRequest size={15} />}>
         <EmptyState>
           <GitPullRequest size={24} />
           <span>GitHub adapter pending</span>
@@ -2349,9 +3360,247 @@ function Sidebar({
   );
 }
 
+function BranchGroup({
+  title,
+  branches,
+  selectedBranchRef,
+  selectBranch,
+  openBranchMenu,
+  deleteBranch
+}: {
+  title: string;
+  branches: DisplayBranch[];
+  selectedBranchRef: string | null;
+  selectBranch: (target: DisplayBranch) => void;
+  openBranchMenu: (target: BranchMenuTarget, event: ReactMouseEvent<HTMLElement>) => void;
+  deleteBranch: (name: string) => void;
+}) {
+  if (branches.length === 0) return null;
+
+  return (
+    <section className="branch-group" aria-label={`${title} branches`}>
+      <div className="branch-group-header">
+        <span>{title}</span>
+        <small>{branches.length}</small>
+      </div>
+      {branches.map((branch) => {
+        const menuTarget = targetFromBranch(branch, "sidebar");
+        return (
+          <div
+            key={branch.fullRef}
+            className={clsx("nav-row", branch.isCurrent && "active", branchIsSelected(branch, selectedBranchRef) && "focused")}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              openBranchMenu(menuTarget, event);
+            }}
+          >
+            <button type="button" onClick={() => selectBranch(branch)} disabled={branch.isUnborn}>
+              <GitBranch size={13} />
+              <span>{branch.name}</span>
+              {branch.isCurrent && <small>current</small>}
+              {branch.isUnborn && <small>unborn</small>}
+              {branch.isRemote && <small>remote</small>}
+            </button>
+            <span className="nav-row-actions">
+              <IconButton label={`${branch.name} actions`} onClick={(event) => openBranchMenu(menuTarget, event)}>
+                <MoreHorizontal size={13} />
+              </IconButton>
+              {!branch.isProtected && !branch.isCurrent && !branch.isUnborn && !branch.isRemote && (
+                <IconButton label="Delete branch" onClick={() => deleteBranch(branch.name)}>
+                  <Trash2 size={13} />
+                </IconButton>
+              )}
+            </span>
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+function BranchInspector({
+  inspection,
+  selectedBranchRef,
+  loading,
+  error,
+  hasWorkingChanges,
+  onCheckout,
+  onFetch,
+  onPull,
+  onPush,
+  onMore,
+  onSelectCommit
+}: {
+  inspection: BranchInspection | null;
+  selectedBranchRef: string | null;
+  loading: boolean;
+  error: string | null;
+  hasWorkingChanges: boolean;
+  onCheckout: (inspection: BranchInspection) => void;
+  onFetch: () => void;
+  onPull: (inspection: BranchInspection) => void;
+  onPush: (inspection: BranchInspection) => void;
+  onMore: (inspection: BranchInspection, event: ReactMouseEvent<HTMLElement>) => void;
+  onSelectCommit: (sha: string) => void;
+}) {
+  if (!selectedBranchRef) {
+    return (
+      <EmptyState>
+        <GitBranch size={24} />
+        <span>Select a branch</span>
+      </EmptyState>
+    );
+  }
+
+  if (loading && !inspection) {
+    return (
+      <EmptyState>
+        <RefreshCw size={22} />
+        <span>Inspecting branch</span>
+      </EmptyState>
+    );
+  }
+
+  if (error) {
+    return <div className="branch-inspector-error">{error}</div>;
+  }
+
+  if (!inspection) {
+    return (
+      <EmptyState>
+        <GitBranch size={24} />
+        <span>Select a branch</span>
+      </EmptyState>
+    );
+  }
+
+  const upstreamCounts = inspection.aheadBehindUpstream;
+  const defaultCounts = inspection.aheadBehindDefault;
+  const compareCounts = upstreamCounts ?? defaultCounts;
+  const compareLabel = upstreamCounts ? inspection.upstream : inspection.defaultBranch;
+  const canCheckout = !inspection.branch.isCurrent && inspection.kind !== "remote";
+  const canPull = inspection.branch.isCurrent && inspection.kind !== "tag";
+  const canPush = inspection.kind === "local" || inspection.kind === "unknown";
+
+  return (
+    <div className="branch-inspector">
+      <div className="branch-inspector-header">
+        <div>
+          <strong title={inspection.branch.name}>{inspection.branch.name}</strong>
+          <span>
+            {inspection.kind}
+            {inspection.branch.isCurrent ? " · current" : ""}
+          </span>
+        </div>
+        <span className={clsx("branch-health-badge", inspection.status)}>{branchInspectionStatusLabel(inspection.status)}</span>
+      </div>
+
+      <div className="branch-inspector-actions">
+        <Button variant="secondary" onClick={() => onCheckout(inspection)} disabled={!canCheckout}>
+          Checkout
+        </Button>
+        <Button variant="ghost" onClick={onFetch}>
+          Fetch
+        </Button>
+        <Button variant="ghost" onClick={() => onPull(inspection)} disabled={!canPull}>
+          Pull
+        </Button>
+        <Button variant="ghost" onClick={() => onPush(inspection)} disabled={!canPush}>
+          Push
+        </Button>
+        <IconButton label="More branch actions" onClick={(event) => onMore(inspection, event)}>
+          <MoreHorizontal size={14} />
+        </IconButton>
+      </div>
+
+      <dl className="branch-inspector-meta">
+        <div>
+          <dt>Upstream</dt>
+          <dd title={inspection.upstream}>{inspection.upstream ?? "Not set"}</dd>
+        </div>
+        <div>
+          <dt>Last updated</dt>
+          <dd>{inspection.lastCommit ? formatDate(inspection.lastCommit.date) : "Unknown"}</dd>
+        </div>
+      </dl>
+
+      <div className="branch-inspector-summary">
+        <div>
+          <span>Ahead</span>
+          <strong>{compareCounts?.ahead ?? 0}</strong>
+        </div>
+        <div>
+          <span>Behind</span>
+          <strong>{compareCounts?.behind ?? 0}</strong>
+        </div>
+        <small>{compareLabel ? `Compared with ${compareLabel}` : "No comparison ref"}</small>
+      </div>
+
+      {inspection.branch.isCurrent && hasWorkingChanges && (
+        <div className="branch-inspector-warning">
+          <AlertTriangle size={13} />
+          <span>Current branch has local working changes.</span>
+        </div>
+      )}
+
+      <section className="branch-inspector-section">
+        <div className="branch-inspector-section-heading">
+          <GitCommitHorizontal size={13} />
+          <span>Recent Activity</span>
+        </div>
+        <div className="branch-inspector-commits">
+          {inspection.recentCommits.length > 0 ? (
+            inspection.recentCommits.map((commit) => (
+              <button key={commit.sha} type="button" onClick={() => onSelectCommit(commit.sha)} title={commit.sha}>
+                <span>{shortSha(commit.sha)}</span>
+                <strong>{commit.message || "(no subject)"}</strong>
+                <small>{commit.author} · {formatDate(commit.date)}</small>
+              </button>
+            ))
+          ) : (
+            <span className="branch-inspector-muted">No commits found.</span>
+          )}
+        </div>
+      </section>
+
+      <section className="branch-inspector-section">
+        <div className="branch-inspector-section-heading">
+          <FileText size={13} />
+          <span>Diff Summary</span>
+        </div>
+        {inspection.diffSummary ? (
+          <div className="branch-inspector-diff">
+            <div className="branch-inspector-diff-stat">
+              <strong>{inspection.diffSummary.fileCount}</strong>
+              <span>files vs {inspection.diffSummary.baseRef}</span>
+              {(inspection.diffSummary.additions !== undefined || inspection.diffSummary.deletions !== undefined) && (
+                <small>
+                  +{inspection.diffSummary.additions ?? 0} -{inspection.diffSummary.deletions ?? 0}
+                </small>
+              )}
+            </div>
+            <div className="branch-inspector-files">
+              {inspection.diffSummary.files.slice(0, 6).map((file) => (
+                <div key={`${file.status}-${file.oldPath ?? ""}-${file.path}`} className="branch-inspector-file" title={file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path}>
+                  <span className={clsx("status-chip", file.status)}>{statusLabel(file)}</span>
+                  <span>{file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path}</span>
+                </div>
+              ))}
+              {inspection.diffSummary.fileCount > 6 && <small className="branch-inspector-muted">+{inspection.diffSummary.fileCount - 6} more files</small>}
+            </div>
+          </div>
+        ) : (
+          <span className="branch-inspector-muted">No comparison available.</span>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function CommitGraphTable({
   rows,
   selectedSha,
+  wipSelected,
   snapshot,
   commitMessage,
   setCommitMessage,
@@ -2361,14 +3610,18 @@ function CommitGraphTable({
   types,
   stagedCount,
   unstagedCount,
+  selectedStack,
   onColumnResizeStart,
   onFilterChange,
   onOpenBranchMenu,
+  onSelectBranch,
   onOpenCommitMenu,
-  onSelect
+  onSelect,
+  onSelectWorktree
 }: {
   rows: GraphRow[];
   selectedSha?: string;
+  wipSelected: boolean;
   snapshot: RepoSnapshot | null;
   commitMessage: string;
   setCommitMessage: (value: string) => void;
@@ -2378,11 +3631,14 @@ function CommitGraphTable({
   types: string[];
   stagedCount: number;
   unstagedCount: number;
+  selectedStack: BranchStack | null;
   onColumnResizeStart: (column: HistoryColumnKey, event: ReactPointerEvent<HTMLButtonElement>) => void;
   onFilterChange: (next: Partial<HistoryFilters>) => void;
   onOpenBranchMenu: (target: BranchMenuTarget, event: ReactMouseEvent<HTMLElement>) => void;
+  onSelectBranch: (target: BranchMenuTarget) => void;
   onOpenCommitMenu: (commit: Commit, event: ReactMouseEvent<HTMLElement>) => void;
   onSelect: (commit: Commit) => void;
+  onSelectWorktree: () => void;
 }) {
   const [openFilterColumn, setOpenFilterColumn] = useState<HistoryFilterColumn | null>(null);
   const naturalLaneCount = Math.min(maxVisibleGraphLanes, Math.max(4, Math.max(...rows.map((row) => row.maxLane), 1)));
@@ -2463,7 +3719,19 @@ function CommitGraphTable({
       </div>
       <div className="graph-history-body">
         {snapshot && snapshot.changes.length > 0 && (
-          <div className="graph-commit-row graph-wip-row" style={{ "--row-color": "var(--warning)" } as CSSProperties} role="row">
+          <div
+            className={clsx("graph-commit-row graph-wip-row", wipSelected && "selected")}
+            style={{ "--row-color": "var(--warning)" } as CSSProperties}
+            role="button"
+            tabIndex={0}
+            onClick={onSelectWorktree}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onSelectWorktree();
+              }
+            }}
+          >
             <span className="branch-tag-cell">
               <span className="ref-chip wip">WIP</span>
             </span>
@@ -2475,6 +3743,7 @@ function CommitGraphTable({
                 value={commitMessage}
                 onChange={(event) => setCommitMessage(event.target.value)}
                 onClick={(event) => event.stopPropagation()}
+                onFocus={onSelectWorktree}
                 onKeyDown={(event) => event.stopPropagation()}
                 placeholder="// WIP"
                 aria-label="Inline commit message"
@@ -2498,10 +3767,12 @@ function CommitGraphTable({
             <span>Clear the active history filters to show the full graph.</span>
           </div>
         )}
-        {rows.map((row) => (
+        {rows.map((row) => {
+          const rowStackItem = selectedStack ? stackItemForCommit(row.commit, selectedStack) : null;
+          return (
           <div
             key={row.commit.sha}
-            className={clsx("graph-commit-row", selectedSha === row.commit.sha && "selected")}
+            className={clsx("graph-commit-row", selectedSha === row.commit.sha && "selected", rowStackItem && "stack-highlight")}
             style={{ "--row-color": row.color } as CSSProperties}
             role="button"
             tabIndex={0}
@@ -2523,9 +3794,13 @@ function CommitGraphTable({
                       className={clsx("ref-chip", ref.kind, refToneClass(ref))}
                       style={{ "--ref-color": ref.color } as CSSProperties}
                       type="button"
-                      aria-haspopup="menu"
+                      aria-label={`Inspect ${ref.label}`}
                       title={ref.raw}
-                      onClick={(event) => onOpenBranchMenu(targetFromRef(ref, row.commit, snapshot), event)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSelectBranch(targetFromRef(ref, row.commit, snapshot));
+                      }}
+                      onContextMenu={(event) => onOpenBranchMenu(targetFromRef(ref, row.commit, snapshot), event)}
                     >
                       {ref.label}
                     </button>
@@ -2535,9 +3810,10 @@ function CommitGraphTable({
                       +{row.refs.length - 2}
                     </span>
                   )}
+                  {rowStackItem && <span className={clsx("stack-row-chip", rowStackItem.status)}>{rowStackItem.status}</span>}
                 </>
               ) : (
-                <span className="ref-placeholder" />
+                rowStackItem ? <span className={clsx("stack-row-chip", rowStackItem.status)}>{rowStackItem.branch}</span> : <span className="ref-placeholder" />
               )}
             </span>
             <CommitGraphSvg row={row} width={graphWidth} laneCount={visibleLaneCount} />
@@ -2549,7 +3825,8 @@ function CommitGraphTable({
             <span className="graph-date-cell">{formatDateTime(row.commit.date)}</span>
             <span className={clsx("graph-hash-cell", snapshot?.commits[0]?.sha === row.commit.sha && "active-head")}>{shortSha(row.commit.sha)}</span>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -2694,20 +3971,149 @@ function CommitGraphSvg({ row, width, laneCount }: { row: GraphRow; width: numbe
   );
 }
 
-function CommitDetail({
-  commit,
-  files,
-  filesLoading,
-  fileError,
-  onSelectParent,
+function StackDetail({
+  stack,
+  onRestack,
+  onSync,
+  onPush,
+  onPrPlan,
+  onRemove
+}: {
+  stack: BranchStack;
+  onRestack: () => void;
+  onSync: () => void;
+  onPush: () => void;
+  onPrPlan: () => void;
+  onRemove: (branch: string) => void;
+}) {
+  return (
+    <div className="selection-detail stack-detail-card">
+      <div className="stack-detail-header">
+        <GitFork size={20} />
+        <span>
+          <strong>{stack.name}</strong>
+          <small>{stack.trunk} · {stack.status}</small>
+        </span>
+      </div>
+      <dl className="commit-detail-meta">
+        <div>
+          <dt>Trunk</dt>
+          <dd>{stack.trunk}</dd>
+        </div>
+        <div>
+          <dt>Branches</dt>
+          <dd>{stack.items.length}</dd>
+        </div>
+      </dl>
+      {stack.lastOperation && <p className="stack-last-operation">{stack.lastOperation}</p>}
+      <div className="stack-detail-list">
+        {stack.items.map((item) => (
+          <div key={item.id} className="stack-detail-row">
+            <span>
+              <strong>{item.branch}</strong>
+              <small>base {item.baseBranch}</small>
+            </span>
+            <em className={clsx("workflow-status", item.status)}>{item.status}</em>
+            <IconButton label="Remove from stack" onClick={() => onRemove(item.branch)}>
+              <X size={12} />
+            </IconButton>
+          </div>
+        ))}
+        {stack.items.length === 0 && (
+          <EmptyState>
+            <GitBranch size={24} />
+            <span>No branches in this stack</span>
+          </EmptyState>
+        )}
+      </div>
+      <div className="stack-detail-actions">
+        <Button variant="ghost" onClick={onRestack}>Restack</Button>
+        <Button variant="ghost" onClick={onSync}>Sync Trunk</Button>
+        <Button variant="ghost" onClick={onPush}>Push Stack</Button>
+        <Button variant="secondary" onClick={onPrPlan}>Prepare PR Chain</Button>
+      </div>
+    </div>
+  );
+}
+
+function WorktreeDetail({
+  snapshot,
+  stagedCount,
+  unstagedCount,
+  selectedFile,
   onSelectFile
 }: {
+  snapshot: RepoSnapshot;
+  stagedCount: number;
+  unstagedCount: number;
+  selectedFile: FileChange | null;
+  onSelectFile: (change: FileChange) => void;
+}) {
+  const changedCount = snapshot.changes.length;
+  const currentBranch = snapshot.branches.find((branch) => branch.isCurrent);
+
+  return (
+    <div className="selection-detail worktree-detail-card">
+      <div className="worktree-detail-header">
+        <ClipboardList size={18} />
+        <div>
+          <strong>Working directory</strong>
+          <span>{snapshot.repository.worktreeState}</span>
+        </div>
+      </div>
+      <p className="worktree-detail-message">
+        {changedCount} file{changedCount === 1 ? "" : "s"} changed on {currentBranch?.name ?? snapshot.repository.head ?? "current branch"}.
+      </p>
+      <dl className="commit-detail-meta">
+        <div>
+          <dt>Unstaged</dt>
+          <dd>{unstagedCount}</dd>
+        </div>
+        <div>
+          <dt>Staged</dt>
+          <dd>{stagedCount}</dd>
+        </div>
+      </dl>
+      {selectedFile ? (
+        <button type="button" className="worktree-selected-file" onClick={() => onSelectFile(selectedFile)}>
+          <span className={clsx("status-chip", selectedFile.status)}>{statusLabel(selectedFile)}</span>
+          <span>{selectedFile.oldPath ? `${selectedFile.oldPath} -> ${selectedFile.path}` : selectedFile.path}</span>
+        </button>
+      ) : (
+        <span className="commit-detail-note">Select a changed file to review its diff.</span>
+      )}
+    </div>
+  );
+}
+
+function CommitDetail({
+  commit,
+  selectedCommitMessage,
+  setSelectedCommitMessage,
+  commitEditorOpen,
+  setCommitEditorOpen,
+  selectedCommitIsHead,
+  stagedChanges,
+  workingChangeCount,
+  loading,
+  onSelectParent,
+  onUpdateMessage,
+  onUndoLastCommit,
+  onSquashLastCommits
+}: {
   commit: Commit | null;
-  files: CommitFile[];
-  filesLoading: boolean;
-  fileError: string | null;
+  selectedCommitMessage: string;
+  setSelectedCommitMessage: (value: string) => void;
+  commitEditorOpen: boolean;
+  setCommitEditorOpen: (value: boolean | ((current: boolean) => boolean)) => void;
+  selectedCommitIsHead: boolean;
+  stagedChanges: FileChange[];
+  workingChangeCount: number;
+  loading: boolean;
   onSelectParent: (sha: string) => void;
-  onSelectFile: (file: CommitFile) => void;
+  onUpdateMessage: () => void;
+  onUndoLastCommit: () => void;
+  onSquashLastCommits: () => void;
 }) {
   if (!commit) {
     return (
@@ -2727,7 +4133,51 @@ function CommitDetail({
           <span>{formatDateTime(commit.date)}</span>
         </div>
       </div>
-      <p className="commit-detail-message">{commit.message || "(no subject)"}</p>
+      <div className="commit-detail-message-block">
+        <div className="commit-detail-message-heading">
+          <span>Message</span>
+          <Button variant="ghost" onClick={() => setCommitEditorOpen((open) => !open)}>
+            {commitEditorOpen ? "Done" : "Edit"}
+          </Button>
+        </div>
+        {commitEditorOpen ? (
+          <div className="selected-commit-editor inline">
+            <textarea
+              value={selectedCommitMessage}
+              onChange={(event) => setSelectedCommitMessage(event.target.value)}
+              placeholder="Selected commit message"
+              aria-label="Selected commit message"
+            />
+            <Button
+              variant="secondary"
+              disabled={
+                loading ||
+                (selectedCommitIsHead ? stagedChanges.length > 0 : workingChangeCount > 0) ||
+                !selectedCommitMessage.trim() ||
+                selectedCommitMessage.trim() === commit.message
+              }
+              onClick={onUpdateMessage}
+            >
+              Update Message
+            </Button>
+            {!selectedCommitIsHead && workingChangeCount === 0 && (
+              <small>Older commit edits rewrite linear local history after creating a safety snapshot.</small>
+            )}
+            {!selectedCommitIsHead && workingChangeCount > 0 && <small>Clean the working tree before rewording older commits.</small>}
+            {selectedCommitIsHead && stagedChanges.length > 0 && <small>Unstage files before amending the HEAD message.</small>}
+            <div className="commit-edit-actions">
+              <Button variant="secondary" disabled={loading} onClick={onUndoLastCommit}>
+                Undo Last Commit
+              </Button>
+              <Button variant="secondary" disabled={loading} onClick={onSquashLastCommits}>
+                Squash Last 2
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <p className="commit-detail-message">{commit.message || "(no subject)"}</p>
+        )}
+      </div>
       <dl className="commit-detail-meta">
         <div>
           <dt>Hash</dt>
@@ -2747,26 +4197,44 @@ function CommitDetail({
           ))}
         </div>
       )}
-      <div className="commit-detail-files">
-        <div className="commit-detail-files-header">
-          <span>Changed files</span>
-          <small>{files.length}</small>
-        </div>
-        {filesLoading ? (
-          <span className="commit-detail-note">Loading changed files</span>
-        ) : fileError ? (
-          <span className="commit-detail-note error">{fileError}</span>
-        ) : files.length > 0 ? (
-          files.slice(0, 5).map((file) => (
-            <button key={`${file.status}-${file.oldPath ?? ""}-${file.path}`} type="button" onClick={() => onSelectFile(file)}>
-              <span className={clsx("status-chip", file.status)}>{statusLabel(file)}</span>
-              <span>{file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path}</span>
-            </button>
-          ))
-        ) : (
-          <span className="commit-detail-note">No changed files</span>
-        )}
-      </div>
+    </div>
+  );
+}
+
+function WorktreeChangeList({
+  changes,
+  selected,
+  onSelect
+}: {
+  changes: FileChange[];
+  selected: FileChange | null;
+  onSelect: (change: FileChange) => void;
+}) {
+  if (changes.length === 0) {
+    return (
+      <EmptyState>
+        <ClipboardList size={24} />
+        <span>No working changes</span>
+      </EmptyState>
+    );
+  }
+
+  return (
+    <div className="file-list commit-file-list">
+      {changes.map((change) => (
+        <button
+          key={`${change.status}-${change.oldPath ?? ""}-${change.path}-${change.staged}-${change.unstaged}`}
+          className={clsx("file-row", "commit-file-row", "worktree-change-row", selected?.path === change.path && "selected")}
+          onClick={() => onSelect(change)}
+          aria-pressed={selected?.path === change.path}
+        >
+          <span className={clsx("status-chip", change.status)}>{statusLabel(change)}</span>
+          <span>{change.oldPath ? `${change.oldPath} -> ${change.path}` : change.path}</span>
+          <small className={clsx("worktree-file-state", change.staged && "staged", change.unstaged && "unstaged")}>
+            {change.staged && change.unstaged ? "staged + unstaged" : change.staged ? "staged" : "unstaged"}
+          </small>
+        </button>
+      ))}
     </div>
   );
 }
@@ -2823,6 +4291,79 @@ function CommitFileList({
   );
 }
 
+function ParallelLaneBar({
+  lanes,
+  selectedLaneId,
+  parallelMode,
+  onSelectLane,
+  onToggleParallel,
+  onCreateLane,
+  onApply,
+  onUnapply,
+  onCommit
+}: {
+  lanes: ParallelLane[];
+  selectedLaneId: string | null;
+  parallelMode: boolean;
+  onSelectLane: (id: string | null) => void;
+  onToggleParallel: () => void;
+  onCreateLane: () => void;
+  onApply: () => void;
+  onUnapply: () => void;
+  onCommit: () => void;
+}) {
+  const selectedLane = lanes.find((lane) => lane.id === selectedLaneId) ?? null;
+
+  return (
+    <div className="parallel-lane-bar">
+      <div className="parallel-lane-heading">
+        <span>
+          <Shuffle size={13} />
+          Parallel Lanes
+        </span>
+        <button type="button" className={clsx(parallelMode && "active")} onClick={onToggleParallel}>
+          {parallelMode ? "Filtering lane" : "Show all changes"}
+        </button>
+      </div>
+      <div className="parallel-lane-chips">
+        <button type="button" className={!selectedLaneId ? "active" : undefined} onClick={() => onSelectLane(null)}>
+          Unassigned
+        </button>
+        {lanes.map((lane) => (
+          <button
+            key={lane.id}
+            type="button"
+            className={clsx(selectedLaneId === lane.id && "active", lane.status)}
+            onClick={() => onSelectLane(lane.id)}
+            title={`${lane.targetBranch} · ${lane.paths.length} files`}
+          >
+            <span>{lane.name}</span>
+            <small>{lane.applied ? "applied" : lane.status}</small>
+          </button>
+        ))}
+        <button type="button" className="create-lane-chip" onClick={onCreateLane}>
+          <Plus size={12} />
+          New Lane
+        </button>
+      </div>
+      {selectedLane ? (
+        <div className="parallel-lane-detail">
+          <span>{selectedLane.targetBranch}</span>
+          <span>{shortSha(selectedLane.baseHead || "unknown")}</span>
+          <span>{selectedLane.paths.length} file{selectedLane.paths.length === 1 ? "" : "s"}</span>
+          <Button variant="ghost" onClick={onApply} disabled={selectedLane.applied}>Apply</Button>
+          <Button variant="ghost" onClick={onUnapply} disabled={!selectedLane.applied}>Unapply</Button>
+          <Button variant="ghost" onClick={onCommit}>Commit Lane</Button>
+        </div>
+      ) : lanes.length === 0 ? (
+        <div className="parallel-empty-inline">No parallel lanes yet.</div>
+      ) : (
+        <div className="parallel-empty-inline">Showing unassigned changes.</div>
+      )}
+    </div>
+  );
+}
+
 function ChangeColumn({
   title,
   changes,
@@ -2833,7 +4374,10 @@ function ChangeColumn({
   bulkLabel,
   primaryAction,
   primaryLabel,
-  secondaryAction
+  secondaryAction,
+  laneForChange,
+  assignLane,
+  createLaneFromChange
 }: {
   title: string;
   changes: FileChange[];
@@ -2845,6 +4389,9 @@ function ChangeColumn({
   primaryAction: (change: FileChange) => void;
   primaryLabel: string;
   secondaryAction: (change: FileChange) => void;
+  laneForChange?: (change: FileChange) => ParallelLane | undefined;
+  assignLane?: (change: FileChange) => void;
+  createLaneFromChange?: (change: FileChange) => void;
 }) {
   const emptyLabel = title.toLowerCase().startsWith("staged") ? "No staged changes" : "No unstaged changes";
 
@@ -2857,53 +4404,81 @@ function ChangeColumn({
         </Button>
       </div>
       <div className="file-list">
-        {changes.map((change) => (
-          <div
-            key={`${change.path}-${change.indexStatus}-${change.worktreeStatus}`}
-            className={clsx("file-row", selected?.path === change.path && "selected")}
-            role="button"
-            tabIndex={0}
-            onClick={() => onSelect(change)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                onSelect(change);
-              }
-            }}
-          >
-            <span className={clsx("status-chip", change.status)}>{statusLabel(change)}</span>
-            <span>{change.path}</span>
-            <span className="file-actions">
-              <IconButton
-                label={primaryLabel}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  primaryAction(change);
-                }}
-              >
-                <Check size={13} />
-              </IconButton>
-              <IconButton
-                label="View diff"
-                onClick={(event) => {
-                  event.stopPropagation();
+        {changes.map((change) => {
+          const lane = laneForChange?.(change);
+          return (
+            <div
+              key={`${change.path}-${change.indexStatus}-${change.worktreeStatus}`}
+              className={clsx("file-row", lane && "lane-owned", selected?.path === change.path && "selected")}
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelect(change)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
                   onSelect(change);
-                }}
-              >
-                <Eye size={13} />
-              </IconButton>
-              <IconButton
-                label="Discard"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  secondaryAction(change);
-                }}
-              >
-                <Trash2 size={13} />
-              </IconButton>
-            </span>
-          </div>
-        ))}
+                }
+              }}
+            >
+              <span className={clsx("status-chip", change.status)}>{statusLabel(change)}</span>
+              <span>
+                {change.path}
+                {lane && <em className="lane-owner-chip">{lane.name}</em>}
+              </span>
+              <span className="file-actions">
+                {assignLane && (
+                  <IconButton
+                    label={lane ? "Move to lane" : "Assign to lane"}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      assignLane(change);
+                    }}
+                  >
+                    <GitFork size={13} />
+                  </IconButton>
+                )}
+                {createLaneFromChange && !lane && (
+                  <IconButton
+                    label="Create lane from file"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      createLaneFromChange(change);
+                    }}
+                  >
+                    <Plus size={13} />
+                  </IconButton>
+                )}
+                <IconButton
+                  label={primaryLabel}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    primaryAction(change);
+                  }}
+                >
+                  <Check size={13} />
+                </IconButton>
+                <IconButton
+                  label="View diff"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onSelect(change);
+                  }}
+                >
+                  <Eye size={13} />
+                </IconButton>
+                <IconButton
+                  label="Discard"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    secondaryAction(change);
+                  }}
+                >
+                  <Trash2 size={13} />
+                </IconButton>
+              </span>
+            </div>
+          );
+        })}
         {changes.length === 0 && (
           <EmptyState>
             <ClipboardList size={24} />
@@ -2972,6 +4547,239 @@ function ActivityPanel({
       </section>
     </div>
   );
+}
+
+function RepositoryManagementPanel({
+  close,
+  runningInTauri,
+  azureDevOpsConfigured,
+  providerAccounts,
+  catalog,
+  repositories,
+  groups,
+  projectNames,
+  filters,
+  setFilters,
+  loading,
+  error,
+  cloneRoot,
+  chooseCloneRoot,
+  refresh,
+  openIntegrations,
+  cloneRepository,
+  openRepository,
+  locateRepository
+}: {
+  close: () => void;
+  runningInTauri: boolean;
+  azureDevOpsConfigured: boolean;
+  providerAccounts: ProviderAccountStatus[];
+  catalog: ProviderRepoCatalog | null;
+  repositories: ProviderRepository[];
+  groups: ReturnType<typeof groupProviderRepositories>;
+  projectNames: string[];
+  filters: ProviderRepositoryFilters;
+  setFilters: (filters: ProviderRepositoryFilters) => void;
+  loading: boolean;
+  error: string | null;
+  cloneRoot: string;
+  chooseCloneRoot: () => void | Promise<void>;
+  refresh: () => void;
+  openIntegrations: () => void;
+  cloneRepository: (repo: ProviderRepository) => void;
+  openRepository: (repo: ProviderRepository) => void;
+  locateRepository: (repo: ProviderRepository) => void;
+}) {
+  const azureStatus = providerAccounts.find((account) => account.provider === "azure-devops");
+  const providerCount = providerAccounts.filter((account) => account.configured).length;
+  const repoCount = catalog?.repositories.length ?? repositories.length;
+  const clonedCount = repositories.filter((repo) => repo.localMatch.status === "cloned" || repo.localMatch.status === "current").length;
+  const updateFilter = <K extends keyof ProviderRepositoryFilters>(key: K, value: ProviderRepositoryFilters[K]) => {
+    setFilters({ ...filters, [key]: value });
+  };
+
+  return (
+    <div className="repo-management-backdrop" role="dialog" aria-modal="true" aria-label="Repository Management">
+      <header className="repo-management-header">
+        <div className="repo-management-heading">
+          <span>
+            <Cloud size={16} />
+            Repository Management
+          </span>
+          <strong>{repoCount} cloud repositories</strong>
+        </div>
+        <div className="repo-management-context">
+          <button className="preferences-repo-chip" onClick={openIntegrations}>
+            <Plug size={14} />
+            <span>{azureStatus?.label ?? "Azure DevOps"}</span>
+          </button>
+          <button className="preferences-exit" onClick={close}>
+            <X size={15} />
+            Close
+          </button>
+        </div>
+      </header>
+
+      <div className="repo-management-toolbar" aria-label="Repository management actions">
+        <Button variant="secondary" onClick={refresh} disabled={loading}>
+          <RefreshCw size={14} />
+          Browse
+        </Button>
+        <Button variant="secondary" disabled>
+          <Download size={14} />
+          Clone
+        </Button>
+        <Button variant="secondary" disabled>
+          <Plus size={14} />
+          Init
+        </Button>
+        <Button variant="secondary" disabled>
+          <Boxes size={14} />
+          New Workspace
+        </Button>
+        <Button variant="secondary" onClick={openIntegrations}>
+          <Plug size={14} />
+          Integrations
+        </Button>
+        <div className="repo-management-summary">
+          <span>{providerCount} connected</span>
+          <span>{clonedCount} local</span>
+          <span>{runningInTauri ? "desktop" : "browser preview"}</span>
+        </div>
+      </div>
+
+      <section className="repo-management-controls">
+        <div className="repo-management-search">
+          <Search size={15} />
+          <input
+            value={filters.search}
+            onChange={(event) => updateFilter("search", event.target.value)}
+            placeholder="Search repositories"
+            aria-label="Search repositories"
+          />
+        </div>
+        <select value={filters.provider} onChange={(event) => updateFilter("provider", event.target.value)}>
+          <option value="all">All providers</option>
+          <option value="azure-devops">Azure DevOps</option>
+        </select>
+        <select value={filters.project} onChange={(event) => updateFilter("project", event.target.value)}>
+          <option value="all">All projects</option>
+          {projectNames.map((project) => (
+            <option key={project} value={project}>
+              {project}
+            </option>
+          ))}
+        </select>
+        <select value={filters.cloneStatus} onChange={(event) => updateFilter("cloneStatus", event.target.value as RepoCloneFilter)}>
+          <option value="all">All local states</option>
+          <option value="cloned">Cloned</option>
+          <option value="not-cloned">Not cloned</option>
+          <option value="missing-path">Missing path</option>
+        </select>
+        <button className="repo-management-root" onClick={() => void chooseCloneRoot()} title={cloneRoot}>
+          <HardDrive size={14} />
+          <span>{cloneRoot || "Choose clone root"}</span>
+        </button>
+      </section>
+
+      <main className="repo-management-content">
+        {error ? (
+          <RepoManagementEmpty icon={<AlertTriangle size={26} />} title={error} actionLabel="Refresh" action={refresh} />
+        ) : loading ? (
+          <RepoManagementEmpty icon={<RefreshCw size={26} />} title="Refreshing repositories" />
+        ) : !catalog ? (
+          <RepoManagementEmpty icon={<Cloud size={26} />} title={runningInTauri ? "No provider catalog loaded" : "Browser preview repositories"} actionLabel="Refresh" action={refresh} />
+        ) : repositories.length === 0 ? (
+          <RepoManagementEmpty icon={<PackageOpen size={26} />} title="No repositories returned" actionLabel="Refresh" action={refresh} />
+        ) : groups.length === 0 ? (
+          <RepoManagementEmpty icon={<Search size={26} />} title="No repositories match the filters" />
+        ) : (
+          <div className="repo-management-table" role="table" aria-label="Cloud repositories">
+            <div className="repo-management-table-head" role="row">
+              <span />
+              <span>Repository</span>
+              <span>Project</span>
+              <span>Provider</span>
+              <span>Branch</span>
+              <span>Local</span>
+              <span>Actions</span>
+            </div>
+            {groups.map((group) => (
+              <section key={group.key} className="repo-management-group">
+                <div className="repo-management-group-header">
+                  <ChevronDown size={14} />
+                  <strong>{group.accountName}</strong>
+                  <span>{group.projectName}</span>
+                  <small>{group.repositories.length}</small>
+                </div>
+                {group.repositories.map((repo) => {
+                  const destination = deriveCloneDestination(cloneRoot, repo.name);
+                  const canClone = Boolean(repo.cloneUrl?.url) && repo.localMatch.status !== "cloned" && repo.localMatch.status !== "current";
+                  const canOpen = Boolean(repo.localMatch.path) && (repo.localMatch.status === "cloned" || repo.localMatch.status === "current");
+                  return (
+                    <div key={repo.id} className="repo-management-row" role="row">
+                      <span className="repo-management-check" aria-hidden="true" />
+                      <div className="repo-management-repo-cell">
+                        <strong>{repo.name}</strong>
+                        <small title={repo.cloneUrl?.safeUrl ?? "No clone URL"}>{repo.cloneUrl?.safeUrl ?? "No clone URL"}</small>
+                      </div>
+                      <span>{repo.projectName ?? "No project"}</span>
+                      <span>{providerLabel(repo.provider, repo.accountName)}</span>
+                      <span>{repo.defaultBranch ?? "unknown"}</span>
+                      <span className={clsx("repo-management-state", repo.localMatch.status)} title={repo.localMatch.path ?? destination.path}>
+                        {localMatchLabel(repo)}
+                      </span>
+                      <div className="repo-management-actions">
+                        <IconButton label={canOpen ? "Open repository" : "Clone repository"} onClick={() => openRepository(repo)} disabled={loading || (!canOpen && !canClone)}>
+                          {canOpen ? <FolderOpen size={13} /> : <Download size={13} />}
+                        </IconButton>
+                        <IconButton label="Locate in filesystem" onClick={() => locateRepository(repo)} disabled={loading}>
+                          <HardDrive size={13} />
+                        </IconButton>
+                        <IconButton label="Refresh repositories" onClick={refresh} disabled={loading}>
+                          <RefreshCw size={13} />
+                        </IconButton>
+                        <IconButton label="Open provider link" disabled={!repo.webUrl} onClick={() => repo.webUrl && window.open(repo.webUrl, "_blank")}>
+                          <ExternalLink size={13} />
+                        </IconButton>
+                      </div>
+                    </div>
+                  );
+                })}
+              </section>
+            ))}
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+function RepoManagementEmpty({ icon, title, actionLabel, action }: { icon: ReactNode; title: string; actionLabel?: string; action?: () => void }) {
+  return (
+    <div className="repo-management-empty">
+      {icon}
+      <strong>{title}</strong>
+      {actionLabel && action && (
+        <Button variant="secondary" onClick={action}>
+          {actionLabel}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function providerLabel(provider: GitProvider, accountName: string) {
+  if (provider === "azure-devops") return `Azure / ${accountName}`;
+  if (provider === "github") return `GitHub / ${accountName}`;
+  return accountName || provider;
+}
+
+function localMatchLabel(repo: ProviderRepository) {
+  if (repo.localMatch.status === "current") return "open";
+  if (repo.localMatch.status === "cloned") return repo.localMatch.path ? "cloned" : "local";
+  if (repo.localMatch.status === "missing-path") return "missing path";
+  return repo.cloneUrl?.kind === "https" ? "clone ready" : "no clone";
 }
 
 function CommandPalette({
@@ -3302,7 +5110,8 @@ function PreferencesPanel({
   setOpenAiModel,
   azureDevOpsConfigured,
   setAzureDevOpsConfigured,
-  preferredIntegration
+  preferredIntegration,
+  openRepositoryManagement
 }: {
   close: () => void;
   section: PreferenceSection;
@@ -3323,6 +5132,7 @@ function PreferencesPanel({
   azureDevOpsConfigured: boolean;
   setAzureDevOpsConfigured: (configured: boolean) => void;
   preferredIntegration: string;
+  openRepositoryManagement: () => void;
 }) {
   const [integration, setIntegration] = useState("OpenAI");
   const [openAiKey, setOpenAiKey] = useState("");
@@ -3332,10 +5142,10 @@ function PreferencesPanel({
   const [azureDevOpsBusy, setAzureDevOpsBusy] = useState(false);
   const [azureDevOpsMessage, setAzureDevOpsMessage] = useState<string | null>(null);
   const openAiStatusMessage = runningInTauri
-    ? `Status: ${openAiConfigured ? "API key configured" : "No API key saved"}. Staged file names, stats, and a capped staged diff are sent only when you request generation.`
+    ? `Saved-state: ${openAiConfigured ? "API key remembered" : "not checked at startup"}. OpenGit checks the keychain only when you save, test, or generate.`
     : "Status: Browser preview cannot save secure OpenAI keys. Open the Tauri desktop window to store the key in the operating system keychain.";
   const azureDevOpsStatusMessage = runningInTauri
-    ? `Status: ${azureDevOpsConfigured ? "PAT configured" : "No PAT saved"}. The token is injected only into Git child processes for Azure DevOps HTTPS remotes.`
+    ? `Saved-state: ${azureDevOpsConfigured ? "PAT remembered" : "not checked at startup"}. OpenGit checks the keychain only when you save the PAT or use Azure DevOps.`
     : "Status: Browser preview cannot save secure Azure DevOps tokens. Open the Tauri desktop window to store the PAT in the operating system keychain.";
 
   const availableIntegrations: Array<{ label: string; icon: typeof Settings }> = [
@@ -3420,6 +5230,11 @@ function PreferencesPanel({
             <SettingRow label="Open Repository" description="Use the native folder picker instead of typing a path.">
               <Button variant="primary" onClick={() => void browseForRepository()}>
                 Browse with Finder
+              </Button>
+            </SettingRow>
+            <SettingRow label="Repository Management" description="Browse connected cloud repositories, clone new repos, or open local matches.">
+              <Button variant="secondary" onClick={openRepositoryManagement}>
+                Open Manager
               </Button>
             </SettingRow>
             <SettingRow label="Current Repository" description="The repository currently loaded in the workspace.">
@@ -3610,6 +5425,9 @@ function PreferencesPanel({
                   <div className="settings-note">
                     OpenGit does not rewrite remote URLs. For Azure HTTPS remotes, the backend adds a scoped Git HTTP extra header for the Azure host only, so the PAT is not printed in URLs or command arguments.
                   </div>
+                  <Button variant="secondary" onClick={openRepositoryManagement}>
+                    Open Repository Management
+                  </Button>
                   {azureDevOpsMessage && <div className="settings-note">{azureDevOpsMessage}</div>}
                 </div>
               ) : (
@@ -3906,6 +5724,38 @@ function renderCommitMessage(message: string): ReactNode {
   );
 }
 
+function buildLanePathMap(lanes: ParallelLane[]) {
+  const map = new Map<string, ParallelLane>();
+  for (const lane of lanes) {
+    for (const lanePath of lane.paths) {
+      map.set(lanePath.path, lane);
+    }
+  }
+  return map;
+}
+
+function filterChangesByLane(changes: FileChange[], selectedLaneId: string | null | undefined, laneByPath: Map<string, ParallelLane>) {
+  if (selectedLaneId === undefined) return changes;
+  if (!selectedLaneId) return changes.filter((change) => !laneByPath.has(change.path));
+  return changes.filter((change) => laneByPath.get(change.path)?.id === selectedLaneId);
+}
+
+function laneNameFromPath(path: string) {
+  const base = path
+    .split("/")
+    .filter(Boolean)
+    .at(-1)
+    ?.replace(/\.[^.]+$/, "")
+    .replace(/[^A-Za-z0-9]+/g, " ")
+    .trim();
+  return base ? `${base} lane` : "Parallel lane";
+}
+
+function stackItemForCommit(commit: Commit, stack: BranchStack) {
+  const refs = parseCommitRefs(commit.refs).map((ref) => ref.label);
+  return stack.items.find((item) => refs.includes(item.branch) || refs.includes(`origin/${item.branch}`)) ?? null;
+}
+
 function buildPushRecoveryState(message: string, detail: string | undefined, snapshot: RepoSnapshot | null): PushRecoveryState {
   const rejectedBranch = detail?.match(/\[rejected\]\s+(\S+)\s+->\s+(\S+)/)?.[1];
   const currentBranch = snapshot?.currentBranch && !["HEAD", "(detached)"].includes(snapshot.currentBranch)
@@ -3928,6 +5778,9 @@ function hasActiveConflictState(snapshot: RepoSnapshot | null) {
 }
 
 function conflictBannerMessage(snapshot: RepoSnapshot) {
+  if (snapshot.activeOperation) {
+    return `${snapshot.activeOperation.label}: ${snapshot.activeOperation.status}.`;
+  }
   const state = worktreeStateLabel(snapshot.repository.worktreeState);
   if (snapshot.conflicts.length > 0) {
     return `${state} stopped with ${snapshot.conflicts.length} unresolved conflict${snapshot.conflicts.length === 1 ? "" : "s"}.`;
@@ -4008,6 +5861,12 @@ function branchMenuItems(target: BranchMenuTarget, snapshot: RepoSnapshot | null
       hint: target.isCommitOnly ? "not a branch" : target.isRemote ? "create local branch here" : target.isCurrent ? "already checked out" : undefined
     },
     { type: "item", action: "create-worktree", label: `Create worktree from ${target.name}`, disabled: true, hint: "post-MVP" },
+    { type: "separator", key: "stack" },
+    { type: "item", action: "stack-create", label: `Create stack from ${target.name}`, disabled: !localBranch },
+    { type: "item", action: "stack-add", label: `Add ${target.name} to selected stack`, disabled: !localBranch || !(snapshot?.branchStacks.length ?? 0) },
+    { type: "item", action: "stack-child", label: `Create child branch from ${target.name}`, disabled: !localBranch },
+    { type: "item", action: "stack-restack", label: "Restack selected stack", disabled: !(snapshot?.branchStacks.length ?? 0) },
+    { type: "item", action: "stack-pr-plan", label: "Prepare stack PR chain", disabled: !(snapshot?.branchStacks.length ?? 0) },
     { type: "separator", key: "commit" },
     { type: "item", action: "create-branch", label: "Create branch here", disabled: target.isUnborn },
     { type: "item", action: "cherry-pick", label: "Cherry pick commit", disabled: !target.commitSha },
@@ -4066,6 +5925,11 @@ function menuPendingLabel(action: BranchMenuAction) {
     rebase: "Rebase",
     checkout: "Checkout",
     "create-worktree": "Create worktree",
+    "stack-create": "Create stack",
+    "stack-add": "Add branch to stack",
+    "stack-child": "Create stack child branch",
+    "stack-restack": "Restack stack",
+    "stack-pr-plan": "Prepare stack PR chain",
     "create-branch": "Create branch",
     "cherry-pick": "Cherry pick",
     reset: "Reset branch",
@@ -4148,8 +6012,43 @@ function targetFromRef(ref: RefChip, commit: Commit, snapshot: RepoSnapshot | nu
   };
 }
 
+function targetFromInspection(inspection: BranchInspection): BranchMenuTarget {
+  return {
+    name: inspection.branch.name,
+    fullRef: inspection.branch.fullRef,
+    kind: inspection.branch.isCurrent ? "head" : inspection.kind === "tag" ? "tag" : inspection.kind === "remote" ? "remote" : "local",
+    source: "sidebar",
+    commitSha: inspection.headSha,
+    upstream: inspection.upstream,
+    isCurrent: inspection.branch.isCurrent,
+    isProtected: inspection.branch.isProtected,
+    isRemote: inspection.kind === "remote",
+    isTag: inspection.kind === "tag",
+    isUnborn: false
+  };
+}
+
 function findBranchByName(snapshot: RepoSnapshot, name: string) {
   return snapshot.branches.find((branch) => branch.name === name || branch.fullRef === name || normalizeRefLabel(branch.fullRef) === name);
+}
+
+function branchRefForInspection(target: BranchMenuTarget | DisplayBranch | Branch) {
+  return target.fullRef || target.name;
+}
+
+function branchIsSelected(branch: Branch, selectedBranchRef: string | null) {
+  if (!selectedBranchRef) return false;
+  return branch.name === selectedBranchRef || branch.fullRef === selectedBranchRef || normalizeRefLabel(branch.fullRef) === selectedBranchRef;
+}
+
+function branchInspectionStatusLabel(status: BranchInspection["status"]) {
+  if (status === "up-to-date") return "Up to date";
+  if (status === "no-upstream") return "No upstream";
+  if (status === "current") return "Current";
+  if (status === "ahead") return "Needs push";
+  if (status === "behind") return "Behind";
+  if (status === "diverged") return "Diverged";
+  return "Unknown";
 }
 
 function defaultBranchFromTarget(target: BranchMenuTarget) {

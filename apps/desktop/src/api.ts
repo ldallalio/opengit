@@ -1,7 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import type { CommitFile, RepoSnapshot } from "@opengit/core";
-import { demoCommitFiles, demoDiff, demoSnapshot } from "./demo";
+import type { BranchInspection, BranchStack, CommitFile, GitProvider, ParallelLane, ProviderAccountStatus, ProviderRepoCatalog, RepoSnapshot } from "@opengit/core";
+import { demoBranchInspection, demoCommitFiles, demoDiff, demoProviderCatalog, demoSnapshot } from "./demo";
 
 export type OpenAiStatus = {
   configured: boolean;
@@ -97,6 +97,24 @@ export async function chooseRepositoryFolder(): Promise<string | null> {
   return selected;
 }
 
+export async function chooseCloneRootFolder(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return window.prompt("Default clone root", "/Users/logandallalio/Documents");
+  }
+
+  const selected = await openDialog({
+    directory: true,
+    multiple: false,
+    title: "Choose Default Clone Root"
+  });
+
+  if (Array.isArray(selected)) {
+    return selected[0] ?? null;
+  }
+
+  return selected;
+}
+
 export const refreshRepo = (repoPath: string, historyLimit?: number) =>
   call<RepoSnapshot>("repo_status", { repoPath, historyLimit }, demoSnapshot);
 
@@ -138,6 +156,20 @@ export const getAzureDevOpsStatus = () => call<AzureDevOpsStatus>("azure_devops_
 export const saveAzureDevOpsPat = (pat: string) => call<AzureDevOpsStatus>("azure_devops_save_pat", { pat }, { configured: false });
 
 export const clearAzureDevOpsPat = () => call<AzureDevOpsStatus>("azure_devops_clear_pat", {}, { configured: false });
+
+export const getProviderAccountsStatus = () =>
+  call<ProviderAccountStatus[]>("provider_accounts_status", {}, [
+    {
+      provider: "azure-devops",
+      configured: false,
+      status: "missing-token",
+      label: "Azure DevOps",
+      detail: "Browser preview uses demo provider repositories."
+    }
+  ]);
+
+export const listProviderRepositories = (provider: GitProvider, localPaths: string[]) =>
+  call<ProviderRepoCatalog>("provider_repos_list", { request: { provider, localPaths } }, demoProviderCatalog);
 
 export const generateAiCommitMessage = (repoPath: string, model?: string) =>
   call<AiCommitSuggestion>(
@@ -192,6 +224,58 @@ export const deleteBranch = (repoPath: string, name: string, force: boolean) =>
 
 export const renameBranch = (repoPath: string, oldName: string, newName: string) =>
   call<RepoSnapshot>("git_branch_rename", { repoPath, oldName, newName }, demoSnapshot);
+
+export const inspectBranch = (repoPath: string, branchRef: string) =>
+  call<BranchInspection>("git_branch_inspect", { repoPath, branchRef }, demoBranchInspection);
+
+export const listStacks = (repoPath: string) => call<BranchStack[]>("git_stack_list", { repoPath }, []);
+
+export const createStack = (repoPath: string, name: string, trunk: string, branches: string[]) =>
+  call<RepoSnapshot>("git_stack_create", { request: { repoPath, name, trunk, branches } }, demoSnapshot);
+
+export const createStackChild = (repoPath: string, stackId: string, baseBranch: string, newBranchName: string) =>
+  call<RepoSnapshot>("git_stack_create_child", { request: { repoPath, stackId, baseBranch, newBranchName } }, demoSnapshot);
+
+export const addBranchToStack = (repoPath: string, stackId: string, branch: string) =>
+  call<RepoSnapshot>("git_stack_add_branch", { request: { repoPath, stackId, branch } }, demoSnapshot);
+
+export const reorderStack = (repoPath: string, stackId: string, orderedBranchNames: string[]) =>
+  call<RepoSnapshot>("git_stack_reorder", { request: { repoPath, stackId, orderedBranchNames } }, demoSnapshot);
+
+export const removeBranchFromStack = (repoPath: string, stackId: string, branch: string) =>
+  call<RepoSnapshot>("git_stack_remove_branch", { repoPath, stackId, branch }, demoSnapshot);
+
+export const restackStack = (repoPath: string, stackId: string) =>
+  call<RepoSnapshot>("git_stack_restack", { repoPath, stackId }, demoSnapshot);
+
+export const syncStackTrunk = (repoPath: string, stackId: string) =>
+  call<RepoSnapshot>("git_stack_sync_trunk", { repoPath, stackId }, demoSnapshot);
+
+export const pushStack = (repoPath: string, stackId: string) =>
+  call<RepoSnapshot>("git_stack_push", { repoPath, stackId }, demoSnapshot);
+
+export const listLanes = (repoPath: string) => call<ParallelLane[]>("git_lane_list", { repoPath }, []);
+
+export const createLane = (repoPath: string, name: string, targetBranch: string, paths: string[]) =>
+  call<RepoSnapshot>("git_lane_create", { request: { repoPath, name, targetBranch, paths } }, demoSnapshot);
+
+export const assignPathsToLane = (repoPath: string, laneId: string, paths: string[]) =>
+  call<RepoSnapshot>("git_lane_assign_paths", { request: { repoPath, laneId, paths } }, demoSnapshot);
+
+export const applyLane = (repoPath: string, laneId: string) =>
+  call<RepoSnapshot>("git_lane_apply", { repoPath, laneId }, demoSnapshot);
+
+export const unapplyLane = (repoPath: string, laneId: string) =>
+  call<RepoSnapshot>("git_lane_unapply", { repoPath, laneId }, demoSnapshot);
+
+export const commitLane = (repoPath: string, laneId: string, message: string) =>
+  call<RepoSnapshot>("git_lane_commit", { request: { repoPath, laneId, message } }, demoSnapshot);
+
+export const discardLane = (repoPath: string, laneId: string) =>
+  call<RepoSnapshot>("git_lane_discard", { repoPath, laneId }, demoSnapshot);
+
+export const materializeLaneBranch = (repoPath: string, laneId: string, branchName: string) =>
+  call<RepoSnapshot>("git_lane_materialize_branch", { request: { repoPath, laneId, branchName } }, demoSnapshot);
 
 export const mergeBranch = (repoPath: string, branch: string) =>
   call<RepoSnapshot>("git_merge", { repoPath, branch }, demoSnapshot);
