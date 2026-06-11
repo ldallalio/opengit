@@ -4127,8 +4127,10 @@ function CommitDetail({
   return (
     <div className="selection-detail commit-detail-card">
       <div className="commit-detail-author">
-        <span className="author-avatar" aria-hidden="true">{authorInitials(commit.author)}</span>
-        <div>
+        <span className="commit-detail-author-icon" aria-hidden="true">
+          <GitCommitHorizontal size={14} />
+        </span>
+        <div className="commit-detail-author-text">
           <strong>{commit.author}</strong>
           <span>{formatDateTime(commit.date)}</span>
         </div>
@@ -6101,17 +6103,6 @@ function repoNameFromPath(path: string) {
 
 function shortSha(sha: string) {
   return sha.slice(0, 7);
-}
-
-function authorInitials(author: string) {
-  const initials = author
-    .split(/\s+/)
-    .map((part) => part[0])
-    .filter(Boolean)
-    .slice(0, 2)
-    .join("")
-    .toUpperCase();
-  return initials || "?";
 }
 
 function formatDate(value: string) {

@@ -2334,39 +2334,41 @@ body.resizing-layout-horizontal {
 
 .commit-detail-author {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 8px;
   align-items: center;
 }
 
-.author-avatar {
+.selection-detail .commit-detail-author-icon {
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
-  border: 1px solid #1f6feb;
-  border-radius: 50%;
-  background: #1a3a6b;
-  color: #79c0ff;
-  font-size: 12px;
-  font-weight: 750;
+  width: 24px;
+  height: 24px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  color: var(--accent);
 }
 
-.commit-detail-author strong,
-.commit-detail-author span {
+.commit-detail-author-icon svg {
+  display: block;
+}
+
+.commit-detail-author-text strong,
+.commit-detail-author-text span {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.commit-detail-author strong {
+.commit-detail-author-text strong {
   color: var(--text);
   font-size: 13px;
   font-weight: 650;
 }
 
-.commit-detail-author span {
+.commit-detail-author-text span {
   color: var(--muted);
   font-size: 11px;
 }
