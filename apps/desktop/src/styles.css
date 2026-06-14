@@ -1676,6 +1676,54 @@ body.resizing-layout-horizontal {
   font-size: 9px;
 }
 
+.history-search {
+  display: inline-grid;
+  grid-template-columns: 16px minmax(120px, 210px) 20px;
+  align-items: center;
+  height: 24px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--quiet);
+  padding: 0 4px 0 7px;
+}
+
+.history-search:focus-within {
+  border-color: var(--focus);
+  color: var(--accent);
+}
+
+.history-search input {
+  min-width: 0;
+  height: 22px;
+  border: 0;
+  background: transparent;
+  color: var(--body);
+  font-size: 10px;
+  outline: 0;
+}
+
+.history-search input::placeholder {
+  color: var(--quiet);
+}
+
+.history-search button {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.history-search button:hover,
+.history-search button:focus-visible {
+  color: var(--text);
+  outline: 0;
+}
+
 .diff-review-panel .og-panel-body {
   overflow: hidden;
 }

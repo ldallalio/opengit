@@ -169,6 +169,13 @@ struct Commit {
     refs: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitPage {
+    commits: Vec<Commit>,
+    has_more: bool,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Branch {
@@ -783,6 +790,58 @@ async fn repo_clone(
 async fn repo_status(repo_path: String, history_limit: Option<u32>) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     build_snapshot(&repo, history_limit).await
+}
+
+#[tauri::command]
+async fn git_commit_search(
+    repo_path: String,
+    query: String,
+    history_limit: Option<u32>,
+) -> CommandResult<Vec<Commit>> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let terms = history_search_terms(&query);
+    let limit = clamp_history_limit(history_limit) as usize;
+
+    if terms.is_empty() {
+        return Ok(parse_commits(
+            &run_git(Some(&repo), history_log_args(limit as u32))
+                .await
+                .unwrap_or_default(),
+        ));
+    }
+
+    Ok(parse_commits(
+        &run_git(Some(&repo), history_search_log_args())
+            .await
+            .unwrap_or_default(),
+    )
+    .into_iter()
+    .filter(|commit| commit_matches_history_search(commit, &terms))
+    .take(limit)
+    .collect())
+}
+
+#[tauri::command]
+async fn git_commit_lookup(repo_path: String, sha: String) -> CommandResult<Commit> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&sha, "commit")?;
+    parse_commits(&run_git(Some(&repo), commit_show_args(&sha)).await?)
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::InvalidInput {
+            code: "INVALID_REF",
+            message: "Commit could not be found.".to_string(),
+        })
+}
+
+#[tauri::command]
+async fn git_commit_page(repo_path: String, skip: u32, limit: Option<u32>) -> CommandResult<CommitPage> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let page_limit = limit.unwrap_or(DEFAULT_HISTORY_LIMIT).clamp(MIN_HISTORY_LIMIT, MAX_HISTORY_LIMIT);
+    let mut commits = parse_commits(&run_git(Some(&repo), history_page_log_args(skip, page_limit + 1)).await?);
+    let has_more = commits.len() > page_limit as usize;
+    commits.truncate(page_limit as usize);
+    Ok(CommitPage { commits, has_more })
 }
 
 #[tauri::command]
@@ -4445,6 +4504,70 @@ fn history_log_args(history_limit: u32) -> Vec<String> {
     ]
 }
 
+fn history_page_log_args(skip: u32, limit: u32) -> Vec<String> {
+    vec![
+        "log".into(),
+        "--all".into(),
+        "--author-date-order".into(),
+        "--date=iso-strict".into(),
+        "--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1e".into(),
+        "--skip".into(),
+        skip.to_string(),
+        "-n".into(),
+        limit.to_string(),
+    ]
+}
+
+fn history_search_log_args() -> Vec<String> {
+    vec![
+        "log".into(),
+        "--all".into(),
+        "--author-date-order".into(),
+        "--date=iso-strict".into(),
+        "--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1e".into(),
+    ]
+}
+
+fn commit_show_args(sha: &str) -> Vec<String> {
+    vec![
+        "show".into(),
+        "--no-patch".into(),
+        "--date=iso-strict".into(),
+        "--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1e".into(),
+        sha.to_string(),
+    ]
+}
+
+fn history_search_terms(query: &str) -> Vec<String> {
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn commit_matches_history_search(commit: &Commit, terms: &[String]) -> bool {
+    let fields = vec![
+        commit.sha.clone(),
+        short_commit_sha(&commit.sha),
+        commit.author.clone(),
+        commit.author_email.clone(),
+        commit.message.clone(),
+        commit.refs.join(" "),
+        commit.date.clone(),
+    ];
+
+    let searchable_text = fields.join(" ").to_lowercase();
+
+    terms.iter().all(|term| searchable_text.contains(term))
+}
+
+fn short_commit_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
 async fn commit_base_ref(repo: &Path, sha: &str) -> CommandResult<String> {
     const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
     let output = run_git(
@@ -6204,6 +6327,9 @@ pub fn run() {
             repo_open,
             repo_clone,
             repo_status,
+            git_commit_search,
+            git_commit_lookup,
+            git_commit_page,
             git_stage,
             git_unstage,
             git_discard,
@@ -6714,6 +6840,91 @@ mod tests {
             .await
             .expect("snapshots")
             .is_empty());
+
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn commit_search_scans_beyond_visible_history_limit() {
+        let repo = init_test_repo("commit-search");
+        let target = commit_test_file(&repo, "file.txt", "target\n", "target commit");
+        for index in 0..55 {
+            let contents = format!("newer {index}\n");
+            let message = format!("newer commit {index}");
+            commit_test_file(&repo, "file.txt", &contents, &message);
+        }
+
+        let limited_snapshot = build_snapshot(&repo, Some(MIN_HISTORY_LIMIT))
+            .await
+            .expect("snapshot should build");
+        assert!(!limited_snapshot
+            .commits
+            .iter()
+            .any(|commit| commit.sha == target));
+
+        let results = git_commit_search(
+            repo.to_string_lossy().to_string(),
+            target[..11].to_string(),
+            Some(MIN_HISTORY_LIMIT),
+        )
+        .await
+        .expect("commit search should run");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].sha, target);
+
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn commit_lookup_finds_commit_outside_visible_history_limit() {
+        let repo = init_test_repo("commit-lookup");
+        let target = commit_test_file(&repo, "file.txt", "target\n", "target commit");
+        for index in 0..55 {
+            let contents = format!("newer {index}\n");
+            let message = format!("newer commit {index}");
+            commit_test_file(&repo, "file.txt", &contents, &message);
+        }
+
+        let limited_snapshot = build_snapshot(&repo, Some(MIN_HISTORY_LIMIT))
+            .await
+            .expect("snapshot should build");
+        assert!(!limited_snapshot
+            .commits
+            .iter()
+            .any(|commit| commit.sha == target));
+
+        let commit = git_commit_lookup(repo.to_string_lossy().to_string(), target.clone())
+            .await
+            .expect("commit lookup should run");
+
+        assert_eq!(commit.sha, target);
+        assert_eq!(commit.message, "target commit");
+
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn commit_page_loads_history_after_skip() {
+        let repo = init_test_repo("commit-page");
+        let oldest = commit_test_file(&repo, "file.txt", "oldest\n", "oldest commit");
+        for index in 0..55 {
+            let contents = format!("newer {index}\n");
+            let message = format!("newer commit {index}");
+            commit_test_file(&repo, "file.txt", &contents, &message);
+        }
+
+        let page = git_commit_page(
+            repo.to_string_lossy().to_string(),
+            MIN_HISTORY_LIMIT,
+            Some(MIN_HISTORY_LIMIT),
+        )
+        .await
+        .expect("commit page should run");
+
+        assert_eq!(page.commits.len(), 6);
+        assert!(!page.has_more);
+        assert_eq!(page.commits.last().map(|commit| commit.sha.as_str()), Some(oldest.as_str()));
 
         let _ = fs::remove_dir_all(repo);
     }

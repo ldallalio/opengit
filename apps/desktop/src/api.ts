@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import type { BranchInspection, BranchStack, CommitFile, GitProvider, ParallelLane, ProviderAccountStatus, ProviderRepoCatalog, RepoSnapshot } from "@opengit/core";
+import type { BranchInspection, BranchStack, Commit, CommitFile, GitProvider, ParallelLane, ProviderAccountStatus, ProviderRepoCatalog, RepoSnapshot } from "@opengit/core";
 import { demoBranchInspection, demoCommitFiles, demoDiff, demoProviderCatalog, demoSnapshot } from "./demo";
 
 export type OpenAiStatus = {
@@ -41,6 +41,11 @@ export type ConflictVersions = {
 };
 
 export type ConflictStrategy = "ours" | "theirs" | "both";
+
+export type CommitPage = {
+  commits: Commit[];
+  hasMore: boolean;
+};
 
 export class OpenGitApiError extends Error {
   code: string;
@@ -117,6 +122,15 @@ export async function chooseCloneRootFolder(): Promise<string | null> {
 
 export const refreshRepo = (repoPath: string, historyLimit?: number) =>
   call<RepoSnapshot>("repo_status", { repoPath, historyLimit }, demoSnapshot);
+
+export const searchCommits = (repoPath: string, query: string, historyLimit?: number) =>
+  call<Commit[]>("git_commit_search", { repoPath, query, historyLimit }, demoSnapshot.commits);
+
+export const lookupCommit = (repoPath: string, sha: string) =>
+  call<Commit>("git_commit_lookup", { repoPath, sha }, demoSnapshot.commits[0]);
+
+export const loadCommitPage = (repoPath: string, skip: number, limit?: number) =>
+  call<CommitPage>("git_commit_page", { repoPath, skip, limit }, { commits: [], hasMore: false });
 
 export const cloneRepo = (url: string, destination: string, historyLimit?: number) =>
   call<RepoSnapshot>("repo_clone", { url, destination, historyLimit }, demoSnapshot);

@@ -104,6 +104,8 @@ import {
   listProviderRepositories,
   inspectBranch,
   isTauriRuntime,
+  loadCommitPage,
+  lookupCommit,
   mergeBranch,
   openRepo,
   pullRepoFastForward,
@@ -120,6 +122,7 @@ import {
   revertCommit,
   saveAzureDevOpsPat,
   saveOpenAiApiKey,
+  searchCommits,
   markConflictResolved,
   materializeLaneBranch,
   stagePaths,
@@ -181,6 +184,7 @@ type HistoryColumnKey = "branch" | "graph" | "message" | "author" | "date" | "ha
 type HistoryColumnWidths = Record<HistoryColumnKey, number>;
 type HistorySortDirection = "desc" | "asc";
 type HistoryFilters = {
+  query: string;
   author: string;
   type: string;
   dateDirection: HistorySortDirection;
@@ -279,6 +283,7 @@ const graphRowHeight = 36;
 const maxVisibleGraphLanes = 12;
 const repoTabLimit = 9;
 const autoRefreshIntervalMs = 2500;
+const historyPageSize = 1000;
 const historyLimitOptions = [100, 250, 500, 1000, 2000] as const;
 const historyColumnStorageKey = "opengit:historyColumnWidths:v2";
 const historyFilterStorageKey = "opengit:historyFilters";
@@ -287,6 +292,7 @@ const providerLocatedPathsStorageKey = "opengit:providerLocatedPaths";
 const openAiConfiguredStorageKey = "opengit:openaiConfigured";
 const azureDevOpsConfiguredStorageKey = "opengit:azureDevOpsConfigured";
 const defaultHistoryFilters: HistoryFilters = {
+  query: "",
   author: "",
   type: "",
   dateDirection: "desc"
@@ -421,6 +427,7 @@ function loadHistoryFilters(): HistoryFilters {
   try {
     const parsed = JSON.parse(localStorage.getItem(historyFilterStorageKey) ?? "{}") as Partial<HistoryFilters>;
     return {
+      query: typeof parsed.query === "string" ? parsed.query : defaultHistoryFilters.query,
       author: typeof parsed.author === "string" ? parsed.author : defaultHistoryFilters.author,
       type: typeof parsed.type === "string" ? parsed.type : defaultHistoryFilters.type,
       dateDirection: parsed.dateDirection === "asc" ? "asc" : defaultHistoryFilters.dateDirection
@@ -532,6 +539,14 @@ export default function App() {
   const [layout, setLayout] = useState<LayoutState>(defaultLayout);
   const [historyColumnWidths, setHistoryColumnWidths] = useState<HistoryColumnWidths>(loadHistoryColumnWidths);
   const [historyFilters, setHistoryFilters] = useState<HistoryFilters>(loadHistoryFilters);
+  const [historySearchResults, setHistorySearchResults] = useState<Commit[] | null>(null);
+  const [historySearchLoading, setHistorySearchLoading] = useState(false);
+  const [historySearchError, setHistorySearchError] = useState<string | null>(null);
+  const [historyPagedCommits, setHistoryPagedCommits] = useState<Commit[]>([]);
+  const [historySupplementalCommits, setHistorySupplementalCommits] = useState<Commit[]>([]);
+  const [historyHasMorePages, setHistoryHasMorePages] = useState(false);
+  const [historyPagingExhausted, setHistoryPagingExhausted] = useState(false);
+  const [historyPageLoading, setHistoryPageLoading] = useState(false);
   const [branchMenu, setBranchMenu] = useState<BranchMenuState | null>(null);
   const [branchSwitcherOpen, setBranchSwitcherOpen] = useState(false);
   const [branchSearch, setBranchSearch] = useState("");
@@ -553,10 +568,27 @@ export default function App() {
   const activeDiffPath = diffMode === "commit" ? selectedCommitFile?.path : selectedFile?.path;
   const activeDiff = diffMode === "commit" ? commitDiff : diff;
   const activeDiffLoading = diffMode === "commit" && commitDiffLoading;
-  const filteredHistoryCommits = useMemo(() => filterHistoryCommits(snapshot?.commits ?? [], historyFilters), [snapshot, historyFilters]);
-  const historyAuthors = useMemo(() => uniqueHistoryAuthors(snapshot?.commits ?? []), [snapshot]);
-  const historyTypes = useMemo(() => uniqueHistoryTypes(snapshot?.commits ?? []), [snapshot]);
+  const historySearchQuery = historyFilters.query.trim();
+  const historyBackendSearchActive = runningInTauri && Boolean(historySearchQuery);
+  const historyLoadedCommits = useMemo(
+    () => uniqueCommitsBySha([...(snapshot?.commits ?? []), ...historyPagedCommits, ...historySupplementalCommits]),
+    [historyPagedCommits, historySupplementalCommits, snapshot]
+  );
+  const historySourceCommits = historyBackendSearchActive ? historySearchResults ?? [] : historyLoadedCommits;
+  const filteredHistoryCommits = useMemo(
+    () => filterHistoryCommits(historySourceCommits, historyBackendSearchActive ? { ...historyFilters, query: "" } : historyFilters),
+    [historyBackendSearchActive, historyFilters, historySourceCommits]
+  );
+  const historyAuthors = useMemo(() => uniqueHistoryAuthors(historyLoadedCommits), [historyLoadedCommits]);
+  const historyTypes = useMemo(() => uniqueHistoryTypes(historyLoadedCommits), [historyLoadedCommits]);
   const historyFiltersActive = areHistoryFiltersActive(historyFilters);
+  const historyMayHaveMorePages = Boolean(
+    runningInTauri &&
+      snapshot &&
+      !historyBackendSearchActive &&
+      !historyPagingExhausted &&
+      (historyHasMorePages || (historyPagedCommits.length === 0 && snapshot.commits.length >= historyLimit))
+  );
   const graphRows = useMemo(() => buildGraphRows(filteredHistoryCommits), [filteredHistoryCommits]);
   const activeConflictState = hasActiveConflictState(snapshot);
   const selectedConflict = useMemo(
@@ -652,6 +684,47 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(historyFilterStorageKey, JSON.stringify(historyFilters));
   }, [historyFilters]);
+
+  useEffect(() => {
+    setHistoryPagedCommits([]);
+    setHistorySupplementalCommits([]);
+    setHistoryHasMorePages(false);
+    setHistoryPagingExhausted(false);
+    setHistoryPageLoading(false);
+  }, [historyLimit, snapshot?.repository.path]);
+
+  useEffect(() => {
+    if (!snapshot || !historyBackendSearchActive) {
+      setHistorySearchResults(null);
+      setHistorySearchLoading(false);
+      setHistorySearchError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      setHistorySearchLoading(true);
+      setHistorySearchError(null);
+      void searchCommits(snapshot.repository.path, historySearchQuery, historyLimit)
+        .then((commits) => {
+          if (!cancelled) setHistorySearchResults(commits);
+        })
+        .catch((searchError) => {
+          if (!cancelled) {
+            setHistorySearchResults([]);
+            setHistorySearchError(searchError instanceof Error ? searchError.message : String(searchError));
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setHistorySearchLoading(false);
+        });
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [historyBackendSearchActive, historyLimit, historySearchQuery, snapshot]);
 
   useEffect(() => {
     if (!snapshot || !activeConflictState) {
@@ -1019,9 +1092,11 @@ export default function App() {
         setPreferencesSection("integrations");
         setPreferencesOpen(true);
       }
+      return false;
     } finally {
       setLoading(false);
     }
+    return true;
   };
 
   const openRepositoryPath = (path: string, limit = historyLimit) =>
@@ -1097,6 +1172,27 @@ export default function App() {
     localStorage.setItem("opengit:historyLimit", String(value));
     if (snapshot) {
       void runSnapshotOperation("Reload history", () => refreshRepo(snapshot.repository.path, value));
+    }
+  };
+
+  const loadMoreHistory = async () => {
+    if (!snapshot || historyPageLoading || historyBackendSearchActive) return;
+
+    const repoPath = snapshot.repository.path;
+    const skip = snapshot.commits.length + historyPagedCommits.length;
+    setHistoryPageLoading(true);
+    setError(null);
+
+    try {
+      const page = await loadCommitPage(repoPath, skip, historyPageSize);
+      setHistoryPagedCommits((current) => uniqueCommitsBySha([...current, ...page.commits]));
+      setHistoryHasMorePages(page.hasMore);
+      setHistoryPagingExhausted(!page.hasMore);
+      setOperationLog((log) => [`Loaded ${page.commits.length} more commit${page.commits.length === 1 ? "" : "s"}`, ...log].slice(0, 8));
+    } catch (pageError) {
+      setError(pageError instanceof Error ? pageError.message : String(pageError));
+    } finally {
+      setHistoryPageLoading(false);
     }
   };
 
@@ -1711,9 +1807,11 @@ export default function App() {
   const commitChanges = () => {
     const repo = requireRepo();
     if (!repo) return;
-    void runSnapshotOperation("Commit", () => commit(repo, commitMessage, amend)).then(() => {
-      setCommitMessage("");
-      setAmend(false);
+    void runSnapshotOperation("Commit", () => commit(repo, commitMessage, amend)).then((committed) => {
+      if (committed) {
+        setCommitMessage("");
+        setAmend(false);
+      }
     });
   };
 
@@ -1856,12 +1954,7 @@ export default function App() {
     }
   };
 
-  const selectCommitBySha = (sha: string) => {
-    const commitItem = snapshot?.commits.find((item) => item.sha === sha);
-    if (!commitItem) {
-      setError("That parent commit is outside the loaded history window. Increase the history limit to load it.");
-      return;
-    }
+  const applySelectedCommit = (commitItem: Commit) => {
     setSelectedCommit(commitItem);
     setWorktreeSelected(false);
     setSelectedCommitMessage(commitItem.message);
@@ -1869,6 +1962,30 @@ export default function App() {
     setDiffMode("commit");
     setCenterView("graph");
     setDiffExpanded(false);
+  };
+
+  const selectCommitBySha = (sha: string) => {
+    const commitItem = historyLoadedCommits.find((item) => item.sha === sha);
+    if (commitItem) {
+      applySelectedCommit(commitItem);
+      return;
+    }
+
+    if (!snapshot || !runningInTauri) {
+      setError("That commit is outside the loaded history window. Load more history to show it.");
+      return;
+    }
+
+    setError(null);
+    void lookupCommit(snapshot.repository.path, sha)
+      .then((fetchedCommit) => {
+        setHistorySupplementalCommits((current) => uniqueCommitsBySha([...current, fetchedCommit]));
+        applySelectedCommit(fetchedCommit);
+        setOperationLog((log) => [`Loaded commit ${shortSha(fetchedCommit.sha)}`, ...log].slice(0, 8));
+      })
+      .catch((lookupError) => {
+        setError(lookupError instanceof Error ? lookupError.message : String(lookupError));
+      });
   };
 
   const stashCurrent = () => {
@@ -2304,16 +2421,45 @@ export default function App() {
                 </div>
               ) : (
                 <div className="history-panel-actions">
+                  <label className="history-search">
+                    <Search size={13} />
+                    <input
+                      value={historyFilters.query}
+                      onChange={(event) => setHistoryFilters((current) => ({ ...current, query: event.target.value }))}
+                      placeholder="Search commits"
+                      aria-label="Search commits"
+                    />
+                    {historyFilters.query && (
+                      <button
+                        type="button"
+                        aria-label="Clear commit search"
+                        onClick={() => setHistoryFilters((current) => ({ ...current, query: "" }))}
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
+                  </label>
                   <span>
                     {snapshot
-                      ? historyFiltersActive
-                        ? `${filteredHistoryCommits.length}/${snapshot.commits.length}`
-                        : `${snapshot.commits.length}/${historyLimit}`
+                      ? historyBackendSearchActive
+                        ? historySearchLoading
+                          ? "searching"
+                          : `${filteredHistoryCommits.length} match${filteredHistoryCommits.length === 1 ? "" : "es"}`
+                      : historyFiltersActive
+                        ? `${filteredHistoryCommits.length}/${historyLoadedCommits.length}`
+                        : historyPagedCommits.length > 0 || historyMayHaveMorePages
+                          ? `${historyLoadedCommits.length}${historyMayHaveMorePages ? "+" : ""}`
+                          : `${snapshot.commits.length}/${historyLimit}`
                       : "0"}
                   </span>
                   {historyFiltersActive && (
                     <Button variant="ghost" onClick={() => setHistoryFilters(defaultHistoryFilters)}>
                       Clear Filters
+                    </Button>
+                  )}
+                  {historyMayHaveMorePages && (
+                    <Button variant="ghost" onClick={() => void loadMoreHistory()} disabled={historyPageLoading || loading}>
+                      {historyPageLoading ? "Loading" : "Load More"}
                     </Button>
                   )}
                   <select
@@ -2366,6 +2512,9 @@ export default function App() {
                 setCommitMessage={setCommitMessage}
                 columnWidths={historyColumnWidths}
                 filters={historyFilters}
+                historySearchLoading={historySearchLoading}
+                historySearchError={historySearchError}
+                backendSearchActive={historyBackendSearchActive}
                 authors={historyAuthors}
                 types={historyTypes}
                 stagedCount={stagedChanges.length}
@@ -3606,6 +3755,9 @@ function CommitGraphTable({
   setCommitMessage,
   columnWidths,
   filters,
+  historySearchLoading,
+  historySearchError,
+  backendSearchActive,
   authors,
   types,
   stagedCount,
@@ -3627,6 +3779,9 @@ function CommitGraphTable({
   setCommitMessage: (value: string) => void;
   columnWidths: HistoryColumnWidths;
   filters: HistoryFilters;
+  historySearchLoading: boolean;
+  historySearchError: string | null;
+  backendSearchActive: boolean;
   authors: string[];
   types: string[];
   stagedCount: number;
@@ -3641,6 +3796,8 @@ function CommitGraphTable({
   onSelectWorktree: () => void;
 }) {
   const [openFilterColumn, setOpenFilterColumn] = useState<HistoryFilterColumn | null>(null);
+  const showWorktreeRow = Boolean(snapshot && snapshot.changes.length > 0 && !hasCommitNarrowingHistoryFilters(filters));
+  const hasSearchQuery = Boolean(filters.query.trim());
   const naturalLaneCount = Math.min(maxVisibleGraphLanes, Math.max(4, Math.max(...rows.map((row) => row.maxLane), 1)));
   const visibleLaneCount = Math.max(4, Math.min(naturalLaneCount, Math.floor((columnWidths.graph - 24) / graphLaneWidth)));
   const graphWidth = columnWidths.graph;
@@ -3718,7 +3875,7 @@ function CommitGraphTable({
         })}
       </div>
       <div className="graph-history-body">
-        {snapshot && snapshot.changes.length > 0 && (
+        {showWorktreeRow && snapshot && (
           <div
             className={clsx("graph-commit-row graph-wip-row", wipSelected && "selected")}
             style={{ "--row-color": "var(--warning)" } as CSSProperties}
@@ -3763,8 +3920,26 @@ function CommitGraphTable({
         {rows.length === 0 && (
           <div className="graph-filter-empty">
             <Search size={16} />
-            <strong>No commits match these filters</strong>
-            <span>Clear the active history filters to show the full graph.</span>
+            <strong>
+              {historySearchLoading
+                ? "Searching commits"
+                : historySearchError
+                  ? "Commit search failed"
+                  : hasSearchQuery
+                    ? "No commits match this search"
+                    : "No commits match these filters"}
+            </strong>
+            <span>
+              {historySearchLoading
+                ? "Checking all locally known refs for matching commits."
+                : historySearchError
+                  ? historySearchError
+                  : hasSearchQuery
+                    ? backendSearchActive
+                      ? "No locally known commit matches this SHA, message, author, ref, or date."
+                      : "The loaded history has no matching SHA, message, author, ref, or date."
+                : "Clear the active history filters to show the full graph."}
+            </span>
           </div>
         )}
         {rows.map((row) => {
@@ -5508,9 +5683,11 @@ function titleForPreferenceSection(section: PreferenceSection) {
 }
 
 function filterHistoryCommits(commits: Commit[], filters: HistoryFilters): Commit[] {
+  const searchTerms = historySearchTerms(filters.query);
   const filtered = commits.filter((commitItem) => {
     if (filters.author && commitItem.author !== filters.author) return false;
     if (filters.type && commitMessageType(commitItem.message) !== filters.type) return false;
+    if (searchTerms.length > 0 && !commitMatchesHistorySearch(commitItem, searchTerms)) return false;
     return true;
   });
 
@@ -5519,6 +5696,40 @@ function filterHistoryCommits(commits: Commit[], filters: HistoryFilters): Commi
   }
 
   return filtered;
+}
+
+function uniqueCommitsBySha(commits: Commit[]) {
+  const seen = new Set<string>();
+  return commits.filter((commitItem) => {
+    if (seen.has(commitItem.sha)) return false;
+    seen.add(commitItem.sha);
+    return true;
+  });
+}
+
+function historySearchTerms(query: string) {
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter(Boolean);
+}
+
+function commitMatchesHistorySearch(commitItem: Commit, terms: string[]) {
+  const searchableText = [
+    commitItem.sha,
+    shortSha(commitItem.sha),
+    commitItem.author,
+    commitItem.authorEmail,
+    commitItem.message,
+    commitItem.refs.join(" "),
+    commitItem.date,
+    formatDateTime(commitItem.date)
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  return terms.every((term) => searchableText.includes(term));
 }
 
 function uniqueHistoryAuthors(commits: Commit[]) {
@@ -5548,7 +5759,11 @@ function commitMessageType(message: string) {
 }
 
 function areHistoryFiltersActive(filters: HistoryFilters) {
-  return Boolean(filters.author || filters.type || filters.dateDirection !== defaultHistoryFilters.dateDirection);
+  return Boolean(filters.query.trim() || filters.author || filters.type || filters.dateDirection !== defaultHistoryFilters.dateDirection);
+}
+
+function hasCommitNarrowingHistoryFilters(filters: HistoryFilters) {
+  return Boolean(filters.query.trim() || filters.author || filters.type);
 }
 
 function buildGraphRows(commits: Commit[]): GraphRow[] {
