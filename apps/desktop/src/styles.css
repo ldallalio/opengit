@@ -302,7 +302,7 @@ textarea:focus-visible {
 
 .topbar {
   display: grid;
-  grid-template-columns: minmax(330px, 460px) minmax(160px, 1fr) auto auto minmax(190px, auto);
+  grid-template-columns: minmax(260px, 460px) minmax(200px, 1fr) auto auto minmax(160px, 260px);
   gap: 12px;
   align-items: center;
   padding: 6px 12px;
@@ -416,11 +416,12 @@ textarea:focus-visible {
 
 .repo-open {
   display: grid;
-  grid-template-columns: 18px minmax(120px, 1fr) 32px 32px 70px;
+  grid-template-columns: 18px minmax(0, 1fr) 32px 32px 70px;
   gap: 8px;
   align-items: center;
   min-width: 0;
   max-width: 560px;
+  overflow: hidden;
 }
 
 .repo-open input {
@@ -453,9 +454,22 @@ textarea {
   gap: 8px;
   align-items: center;
   min-width: 0;
+  overflow: hidden;
   color: var(--muted);
   font-size: 11px;
   white-space: nowrap;
+}
+
+.repo-state .repo-state-ref {
+  min-width: 0;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.repo-state .state-pill,
+.repo-state > span:not(.repo-state-ref) {
+  flex: none;
 }
 
 .layout-controls {
@@ -3535,6 +3549,73 @@ body.resizing-layout-horizontal {
 
 .palette-list button:hover {
   background: var(--panel-2);
+}
+
+.prompt-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  padding-top: 18vh;
+  background: rgba(0, 0, 0, 0.42);
+  z-index: 60;
+}
+
+.prompt-dialog {
+  width: min(440px, calc(100vw - 40px));
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  box-shadow: 0 18px 44px var(--shadow);
+}
+
+.prompt-dialog form {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px 16px;
+}
+
+.prompt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.prompt-header h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.prompt-dialog label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.prompt-dialog input {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.prompt-dialog input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.panel-action-group .og-icon-button.branch-create-action {
+  color: var(--accent);
 }
 
 .branch-context-menu {

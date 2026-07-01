@@ -217,6 +217,13 @@ type PushRecoveryState = {
   remote?: string;
   branch?: string;
 };
+type PromptRequest = {
+  title: string;
+  label?: string;
+  defaultValue?: string;
+  placeholder?: string;
+  confirmLabel?: string;
+};
 type BranchMenuAction =
   | "pull"
   | "push"
@@ -533,6 +540,8 @@ export default function App() {
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [preferencesSection, setPreferencesSection] = useState<PreferenceSection>("repositories");
   const [error, setError] = useState<string | null>(null);
+  const [promptRequest, setPromptRequest] = useState<PromptRequest | null>(null);
+  const promptResolverRef = useRef<((value: string | null) => void) | null>(null);
   const [pushRecovery, setPushRecovery] = useState<PushRecoveryState | null>(null);
   const [recentRepos, setRecentRepos] = useState<string[]>(loadRecentRepos);
   const [repoTabs, setRepoTabs] = useState<string[]>(loadRepoTabs);
@@ -1354,6 +1363,24 @@ export default function App() {
     setOperationLog((log) => [message, ...log].slice(0, 8));
   };
 
+  // In-app text prompt. Replaces window.prompt, which Tauri's macOS WebView (WKWebView)
+  // does not implement -- it returns null without showing a dialog, so prompt-based flows
+  // silently fail in the built desktop app.
+  const promptText = useCallback((request: PromptRequest) => {
+    return new Promise<string | null>((resolve) => {
+      promptResolverRef.current?.(null);
+      promptResolverRef.current = resolve;
+      setPromptRequest(request);
+    });
+  }, []);
+
+  const resolvePrompt = useCallback((value: string | null) => {
+    const resolver = promptResolverRef.current;
+    promptResolverRef.current = null;
+    setPromptRequest(null);
+    resolver?.(value);
+  }, []);
+
   const copyMenuText = async (label: string, value?: string) => {
     setBranchMenu(null);
     if (!value) {
@@ -1381,7 +1408,7 @@ export default function App() {
     void runSnapshotOperation(label, () => operation(repo));
   };
 
-  const handleBranchMenuAction = (action: BranchMenuAction, target: BranchMenuTarget) => {
+  const handleBranchMenuAction = async (action: BranchMenuAction, target: BranchMenuTarget) => {
     const branchRecord = snapshot ? findBranchByName(snapshot, target.name) : undefined;
     const currentBranch = snapshot?.currentBranch ?? "current branch";
     const remote = snapshot?.remotes[0];
@@ -1477,11 +1504,15 @@ export default function App() {
 
     if (action === "create-branch") {
       const defaultName = defaultBranchFromTarget(target);
-      const nextName = window.prompt("New branch name", defaultName);
-      if (!nextName?.trim()) {
-        setBranchMenu(null);
-        return;
-      }
+      setBranchMenu(null);
+      const nextName = await promptText({
+        title: "Create branch",
+        label: `New branch from ${target.commitSha ? shortSha(target.commitSha) : target.name}`,
+        defaultValue: defaultName,
+        placeholder: "feature/my-branch",
+        confirmLabel: "Create branch"
+      });
+      if (!nextName?.trim()) return;
       runBranchTargetOperation("Create branch", (repo) => createBranch(repo, nextName.trim(), true, target.commitSha ?? target.name));
       return;
     }
@@ -1505,11 +1536,14 @@ export default function App() {
     }
 
     if (action === "rename") {
-      const nextName = window.prompt("Rename branch", target.name);
-      if (!nextName?.trim() || nextName.trim() === target.name) {
-        setBranchMenu(null);
-        return;
-      }
+      setBranchMenu(null);
+      const nextName = await promptText({
+        title: "Rename branch",
+        label: `Rename '${target.name}' to`,
+        defaultValue: target.name,
+        confirmLabel: "Rename"
+      });
+      if (!nextName?.trim() || nextName.trim() === target.name) return;
       runBranchTargetOperation("Rename branch", (repo) => renameBranch(repo, target.name, nextName.trim()));
       return;
     }
@@ -1520,12 +1554,18 @@ export default function App() {
     }
 
     if (action === "create-tag" || action === "create-annotated-tag") {
-      const tagName = window.prompt("Tag name", "");
-      if (!tagName?.trim()) {
-        setBranchMenu(null);
-        return;
-      }
-      const message = action === "create-annotated-tag" ? window.prompt("Tag message", tagName.trim())?.trim() : undefined;
+      setBranchMenu(null);
+      const tagName = await promptText({
+        title: action === "create-annotated-tag" ? "Create annotated tag" : "Create tag",
+        label: `Tag ${target.commitSha ? shortSha(target.commitSha) : target.name}`,
+        placeholder: "v1.0.0",
+        confirmLabel: "Create tag"
+      });
+      if (!tagName?.trim()) return;
+      const message =
+        action === "create-annotated-tag"
+          ? (await promptText({ title: "Tag message", label: `Annotation for '${tagName.trim()}'`, defaultValue: tagName.trim() }))?.trim()
+          : undefined;
       runBranchTargetOperation("Create tag", (repo) => createTag(repo, tagName.trim(), target.commitSha ?? target.name, message));
       return;
     }
@@ -1622,6 +1662,24 @@ export default function App() {
     return snapshot.repository.path;
   };
 
+  const createBranchInteractive = async () => {
+    const repo = requireRepo();
+    if (!repo || !snapshot) return;
+    const base =
+      snapshot.currentBranch && !["HEAD", "(detached)"].includes(snapshot.currentBranch)
+        ? snapshot.currentBranch
+        : undefined;
+    const nextName = await promptText({
+      title: "New branch",
+      label: base ? `New branch from '${base}'` : "New branch from current HEAD",
+      placeholder: "feature/my-branch",
+      confirmLabel: "Create branch"
+    });
+    if (!nextName?.trim()) return;
+    await runSnapshotOperation("Create branch", () => createBranch(repo, nextName.trim(), true, base));
+    setOperationLog((log) => [`Created branch ${nextName.trim()}`, ...log].slice(0, 8));
+  };
+
   const fileAction = (label: string, change: FileChange, operation: (repo: string, paths: string[]) => Promise<RepoSnapshot>) => {
     const repo = requireRepo();
     if (!repo) return;
@@ -1639,7 +1697,7 @@ export default function App() {
     void runSnapshotOperation(label, () => operation(repo, paths));
   };
 
-  const createStackFromBranch = (branchName?: string) => {
+  const createStackFromBranch = async (branchName?: string) => {
     const repo = requireRepo();
     if (!repo || !snapshot) return;
     const currentBranch = branchName ?? snapshot.currentBranch ?? "";
@@ -1648,9 +1706,9 @@ export default function App() {
       return;
     }
     const defaultTrunk = snapshot.branches.find((branch) => branch.name === "main" || branch.name === "master")?.name ?? currentBranch;
-    const trunk = window.prompt("Stack trunk branch", defaultTrunk);
+    const trunk = await promptText({ title: "Create stack", label: "Trunk branch", defaultValue: defaultTrunk, confirmLabel: "Next" });
     if (!trunk?.trim()) return;
-    const name = window.prompt("Stack name", `${currentBranch} stack`);
+    const name = await promptText({ title: "Create stack", label: "Stack name", defaultValue: `${currentBranch} stack`, confirmLabel: "Create stack" });
     if (!name?.trim()) return;
     const branches = currentBranch === trunk.trim() ? [] : [currentBranch];
     void runSnapshotOperation("Create stack", () => createStack(repo, name.trim(), trunk.trim(), branches)).then(() => {
@@ -1674,14 +1732,19 @@ export default function App() {
     void runSnapshotOperation("Add branch to stack", () => addBranchToStack(repo, stack.id, branch));
   };
 
-  const createChildBranchForStack = (baseBranch?: string) => {
+  const createChildBranchForStack = async (baseBranch?: string) => {
     const repo = requireRepo();
     if (!repo || !selectedStack) {
       setError("Select a stack before creating a child branch.");
       return;
     }
     const base = baseBranch ?? selectedStack.items.at(-1)?.branch ?? selectedStack.trunk;
-    const name = window.prompt("Child branch name", `${base.replace(/^origin\//, "")}-child`);
+    const name = await promptText({
+      title: "Create child branch",
+      label: `Child of '${base.replace(/^origin\//, "")}'`,
+      defaultValue: `${base.replace(/^origin\//, "")}-child`,
+      confirmLabel: "Create branch"
+    });
     if (!name?.trim()) return;
     void runSnapshotOperation("Create stack child branch", () => createStackChild(repo, selectedStack.id, base, name.trim()));
   };
@@ -1736,7 +1799,7 @@ export default function App() {
     void runSnapshotOperation("Remove branch from stack", () => removeBranchFromStack(repo, selectedStack.id, branch));
   };
 
-  const createLaneFromChanges = (changes: FileChange[] = selectedFile ? [selectedFile] : []) => {
+  const createLaneFromChanges = async (changes: FileChange[] = selectedFile ? [selectedFile] : []) => {
     const repo = requireRepo();
     if (!repo || !snapshot) return;
     const paths = [...new Set(changes.map((change) => change.path))];
@@ -1744,7 +1807,12 @@ export default function App() {
       setError("Select at least one changed file before creating a parallel lane.");
       return;
     }
-    const name = window.prompt("Parallel lane name", laneNameFromPath(paths[0]));
+    const name = await promptText({
+      title: "Create parallel lane",
+      label: "Lane name",
+      defaultValue: laneNameFromPath(paths[0]),
+      confirmLabel: "Create lane"
+    });
     if (!name?.trim()) return;
     const targetBranch = snapshot.currentBranch && !["HEAD", "(detached)"].includes(snapshot.currentBranch) ? snapshot.currentBranch : "main";
     void runSnapshotOperation("Create parallel lane", () => createLane(repo, name.trim(), targetBranch, paths)).then(() => {
@@ -1752,18 +1820,20 @@ export default function App() {
     });
   };
 
-  const assignChangeToLane = (change: FileChange) => {
+  const assignChangeToLane = async (change: FileChange) => {
     const repo = requireRepo();
     if (!repo || !snapshot) return;
     if (snapshot.parallelLanes.length === 0) {
-      createLaneFromChanges([change]);
+      void createLaneFromChanges([change]);
       return;
     }
     const defaultLane = selectedLane ?? snapshot.parallelLanes[0];
-    const laneName = window.prompt(
-      `Assign '${change.path}' to lane`,
-      defaultLane.name
-    );
+    const laneName = await promptText({
+      title: "Assign to lane",
+      label: `Lane for '${change.path}'`,
+      defaultValue: defaultLane.name,
+      confirmLabel: "Assign"
+    });
     if (!laneName?.trim()) return;
     const lane = snapshot.parallelLanes.find((item) => item.name === laneName.trim()) ?? defaultLane;
     void runSnapshotOperation("Assign file to lane", () => assignPathsToLane(repo, lane.id, [change.path]));
@@ -1781,10 +1851,15 @@ export default function App() {
     void runSnapshotOperation("Unapply lane", () => unapplyLane(repo, selectedLane.id));
   };
 
-  const commitSelectedLane = () => {
+  const commitSelectedLane = async () => {
     const repo = requireRepo();
     if (!repo || !selectedLane) return;
-    const message = window.prompt("Commit message for lane", commitMessage || selectedLane.name);
+    const message = await promptText({
+      title: "Commit lane",
+      label: `Commit message for '${selectedLane.name}'`,
+      defaultValue: commitMessage || selectedLane.name,
+      confirmLabel: "Commit"
+    });
     if (!message?.trim()) return;
     void runSnapshotOperation("Commit lane", () => commitLane(repo, selectedLane.id, message.trim()));
   };
@@ -1796,10 +1871,15 @@ export default function App() {
     void runSnapshotOperation("Discard lane", () => discardLane(repo, selectedLane.id));
   };
 
-  const materializeSelectedLane = () => {
+  const materializeSelectedLane = async () => {
     const repo = requireRepo();
     if (!repo || !selectedLane) return;
-    const branchName = window.prompt("Materialize lane as branch", `${selectedLane.targetBranch}-${selectedLane.name}`.replace(/\s+/g, "-"));
+    const branchName = await promptText({
+      title: "Materialize lane as branch",
+      label: "Branch name",
+      defaultValue: `${selectedLane.targetBranch}-${selectedLane.name}`.replace(/\s+/g, "-"),
+      confirmLabel: "Create branch"
+    });
     if (!branchName?.trim()) return;
     void runSnapshotOperation("Materialize lane branch", () => materializeLaneBranch(repo, selectedLane.id, branchName.trim()));
   };
@@ -1853,7 +1933,12 @@ export default function App() {
     setError(null);
     try {
       const suggestion = await generateAiBranchName(repo, openAiModel);
-      const nextName = window.prompt("Create branch from AI suggestion", suggestion.name);
+      const nextName = await promptText({
+        title: "Create branch from AI suggestion",
+        label: "Branch name",
+        defaultValue: suggestion.name,
+        confirmLabel: "Create branch"
+      });
       if (!nextName?.trim()) return;
       await runSnapshotOperation("Create AI-named branch", () => createBranch(repo, nextName.trim(), true));
       setOperationLog((log) => ["Generated branch name from current changes", ...log].slice(0, 8));
@@ -1926,11 +2011,16 @@ export default function App() {
     void runSnapshotOperation("Undo last commit", () => undoLastCommit(repo));
   };
 
-  const squashLastCommitsAction = () => {
+  const squashLastCommitsAction = async () => {
     const repo = requireRepo();
     if (!repo) return;
     const defaultMessage = selectedCommitMessage.trim() || selectedCommit?.message || snapshot?.commits[0]?.message || "";
-    const message = window.prompt("Message for squashed commit", defaultMessage);
+    const message = await promptText({
+      title: "Squash last two commits",
+      label: "Message for squashed commit",
+      defaultValue: defaultMessage,
+      confirmLabel: "Continue"
+    });
     if (!message?.trim()) return;
     if (!window.confirm("Squash the last two linear commits? OpenGit will create a safety snapshot first.")) return;
     void runSnapshotOperation("Squash last commits", () => squashLastCommits(repo, message.trim()));
@@ -2156,8 +2246,8 @@ export default function App() {
           <div className="repo-identity-strip" aria-label="Repository status">
             <button className="repo-identity-card repository-card" type="button" onClick={browseForRepository} disabled={loading}>
               <span>repository</span>
-              <strong>{snapshot?.repository.name ?? repoNameFromPath(repoPath)}</strong>
-              <small>{snapshot?.repository.path ?? repoPath}</small>
+              <strong title={snapshot?.repository.name ?? repoNameFromPath(repoPath)}>{snapshot?.repository.name ?? repoNameFromPath(repoPath)}</strong>
+              <small title={snapshot?.repository.path ?? repoPath}>{snapshot?.repository.path ?? repoPath}</small>
               <ChevronRight size={14} />
             </button>
             <div className="branch-switcher-wrap" onPointerDown={(event) => event.stopPropagation()}>
@@ -2173,8 +2263,8 @@ export default function App() {
                 aria-expanded={branchSwitcherOpen}
               >
                 <span>branch</span>
-                <strong>{snapshot?.currentBranch ?? "No branch"}</strong>
-                <small>{snapshot?.upstream ?? "local"}</small>
+                <strong title={snapshot?.currentBranch ?? "No branch"}>{snapshot?.currentBranch ?? "No branch"}</strong>
+                <small title={snapshot?.upstream ?? "local"}>{snapshot?.upstream ?? "local"}</small>
                 <ChevronDown size={14} />
               </button>
               {branchSwitcherOpen && (
@@ -2238,8 +2328,8 @@ export default function App() {
             {snapshot && (
               <>
                 <span className={clsx("state-pill", snapshot.repository.worktreeState)}>{snapshot.repository.worktreeState}</span>
-                <span>{snapshot.currentBranch ?? "detached"}</span>
-                {snapshot.upstream && <span>{snapshot.upstream}</span>}
+                <span className="repo-state-ref" title={snapshot.currentBranch ?? "detached"}>{snapshot.currentBranch ?? "detached"}</span>
+                {snapshot.upstream && <span className="repo-state-ref" title={snapshot.upstream}>{snapshot.upstream}</span>}
                 <span>+{snapshot.ahead}</span>
                 <span>-{snapshot.behind}</span>
                 {!runningInTauri && <span className="state-pill preview">browser preview</span>}
@@ -2320,6 +2410,7 @@ export default function App() {
             setStashMessage={setStashMessage}
             addRemote={addRepositoryRemote}
             stashCurrent={stashCurrent}
+            createBranchInteractive={() => void createBranchInteractive()}
             generateBranchName={() => void generateBranchName()}
             aiGeneratingBranch={aiGeneratingBranch}
             selectedBranchRef={selectedBranchRef}
@@ -2857,7 +2948,83 @@ export default function App() {
           locateRepository={(repo) => void locateProviderRepository(repo)}
         />
       )}
+      {promptRequest && (
+        <PromptDialog
+          request={promptRequest}
+          onSubmit={(value) => resolvePrompt(value)}
+          onCancel={() => resolvePrompt(null)}
+        />
+      )}
     </main>
+  );
+}
+
+function PromptDialog({
+  request,
+  onSubmit,
+  onCancel
+}: {
+  request: PromptRequest;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(request.defaultValue ?? "");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, []);
+
+  return (
+    <div className="prompt-backdrop" onMouseDown={onCancel}>
+      <div
+        className="prompt-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={request.title}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmit(value);
+          }}
+        >
+          <div className="prompt-header">
+            <h2>{request.title}</h2>
+            <IconButton label="Close" onClick={onCancel}>
+              <X size={14} />
+            </IconButton>
+          </div>
+          {request.label && <label htmlFor="prompt-dialog-input">{request.label}</label>}
+          <input
+            id="prompt-dialog-input"
+            ref={inputRef}
+            value={value}
+            placeholder={request.placeholder}
+            aria-label={request.label ?? request.title}
+            onChange={(event) => setValue(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                onCancel();
+              }
+            }}
+          />
+          <div className="prompt-actions">
+            <Button type="button" variant="ghost" onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" disabled={!value.trim()}>
+              {request.confirmLabel ?? "OK"}
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
@@ -3156,6 +3323,7 @@ function Sidebar({
   setStashMessage,
   addRemote,
   stashCurrent,
+  createBranchInteractive,
   generateBranchName,
   aiGeneratingBranch,
   selectedBranchRef,
@@ -3206,6 +3374,7 @@ function Sidebar({
   setStashMessage: (value: string) => void;
   addRemote: () => void;
   stashCurrent: () => void;
+  createBranchInteractive: () => void;
   generateBranchName: () => void;
   aiGeneratingBranch: boolean;
   selectedBranchRef: string | null;
@@ -3258,10 +3427,17 @@ function Sidebar({
         className="sidebar-branches-panel"
         actions={
           <span className="panel-action-group">
+            <IconButton
+              label="New branch"
+              className="branch-create-action"
+              onClick={createBranchInteractive}
+              disabled={!snapshot}
+            >
+              <Plus size={14} />
+            </IconButton>
             <IconButton label="Generate branch name" onClick={generateBranchName} disabled={!snapshot || aiGeneratingBranch}>
               <Sparkles size={13} />
             </IconButton>
-            <GitBranch size={15} />
           </span>
         }
       >
