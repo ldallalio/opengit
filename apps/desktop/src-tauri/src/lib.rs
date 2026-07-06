@@ -503,6 +503,7 @@ struct BranchStatus {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BranchCreateRequest {
     repo_path: String,
     name: String,
@@ -790,6 +791,75 @@ async fn repo_clone(
 async fn repo_status(repo_path: String, history_limit: Option<u32>) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     build_snapshot(&repo, history_limit).await
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitIdentity {
+    name: Option<String>,
+    email: Option<String>,
+}
+
+async fn read_global_git_config_value(key: &str) -> Option<String> {
+    run_git(
+        None,
+        vec![
+            "config".into(),
+            "--global".into(),
+            "--get".into(),
+            key.into(),
+        ],
+    )
+    .await
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty())
+}
+
+#[tauri::command]
+async fn git_identity_get() -> CommandResult<GitIdentity> {
+    Ok(GitIdentity {
+        name: read_global_git_config_value("user.name").await,
+        email: read_global_git_config_value("user.email").await,
+    })
+}
+
+#[tauri::command]
+async fn git_identity_set(name: String, email: String) -> CommandResult<GitIdentity> {
+    let name = name.trim().to_string();
+    let email = email.trim().to_string();
+    if name.is_empty() {
+        return invalid("INVALID_NAME", "Author name is required.");
+    }
+    if email.is_empty() {
+        return invalid("INVALID_EMAIL", "Author email is required.");
+    }
+
+    run_git(
+        None,
+        vec![
+            "config".into(),
+            "--global".into(),
+            "user.name".into(),
+            name.clone(),
+        ],
+    )
+    .await?;
+    run_git(
+        None,
+        vec![
+            "config".into(),
+            "--global".into(),
+            "user.email".into(),
+            email.clone(),
+        ],
+    )
+    .await?;
+
+    Ok(GitIdentity {
+        name: Some(name),
+        email: Some(email),
+    })
 }
 
 #[tauri::command]
@@ -2454,6 +2524,151 @@ async fn git_stash_push(repo_path: String, message: String) -> CommandResult<Rep
 }
 
 #[tauri::command]
+async fn git_stash_push_paths(
+    repo_path: String,
+    paths: Vec<String>,
+    message: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let safe_paths = validate_file_paths(&paths)?;
+    let mut args = vec!["stash".into(), "push".into(), "--include-untracked".into()];
+    if !message.trim().is_empty() {
+        args.extend(["-m".into(), message]);
+    }
+    args.push("--".into());
+    args.extend(safe_paths);
+    run_git_with_safety_snapshot(&repo, "before stash file", args).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_ignore_add(repo_path: String, pattern: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let pattern = pattern.trim().to_string();
+    if pattern.is_empty() {
+        return invalid("INVALID_PATTERN", "Ignore pattern is required.");
+    }
+    if pattern.contains('\n') || pattern.contains('\r') {
+        return invalid("INVALID_PATTERN", "Ignore pattern must be a single line.");
+    }
+
+    let gitignore = repo.join(".gitignore");
+    let existing = fs::read_to_string(&gitignore).unwrap_or_default();
+    if !existing.lines().any(|line| line.trim() == pattern) {
+        let mut next = existing;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(&pattern);
+        next.push('\n');
+        fs::write(&gitignore, next)?;
+    }
+    build_snapshot(&repo, None).await
+}
+
+async fn spawn_system_open(command: &str, args: Vec<String>) -> CommandResult<()> {
+    let status = Command::new(command).args(args).status().await?;
+    if status.success() {
+        Ok(())
+    } else {
+        invalid("OPEN_FAILED", "The system open command failed.")
+    }
+}
+
+fn resolve_working_file(repo: &Path, path: &str) -> CommandResult<PathBuf> {
+    let safe = validate_file_paths(&[path.to_string()])?;
+    Ok(repo.join(&safe[0]))
+}
+
+#[tauri::command]
+async fn file_show_in_folder(repo_path: String, path: String) -> CommandResult<()> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let target = resolve_working_file(&repo, &path)?;
+    if cfg!(target_os = "macos") {
+        spawn_system_open("open", vec!["-R".into(), target.display().to_string()]).await
+    } else if cfg!(target_os = "windows") {
+        spawn_system_open("explorer", vec![format!("/select,{}", target.display())]).await
+    } else {
+        let parent = target
+            .parent()
+            .map(|value| value.display().to_string())
+            .unwrap_or_else(|| repo.display().to_string());
+        spawn_system_open("xdg-open", vec![parent]).await
+    }
+}
+
+#[tauri::command]
+async fn file_open_default(repo_path: String, path: String) -> CommandResult<()> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let target = resolve_working_file(&repo, &path)?;
+    let target_str = target.display().to_string();
+    if cfg!(target_os = "macos") {
+        spawn_system_open("open", vec![target_str]).await
+    } else if cfg!(target_os = "windows") {
+        spawn_system_open("cmd", vec!["/C".into(), "start".into(), String::new(), target_str]).await
+    } else {
+        spawn_system_open("xdg-open", vec![target_str]).await
+    }
+}
+
+#[tauri::command]
+async fn file_open_in_editor(repo_path: String, path: String) -> CommandResult<()> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let target = resolve_working_file(&repo, &path)?;
+    let target_str = target.display().to_string();
+    if spawn_system_open("code", vec![target_str.clone()]).await.is_ok() {
+        return Ok(());
+    }
+    if cfg!(target_os = "macos") {
+        return spawn_system_open(
+            "open",
+            vec!["-a".into(), "Visual Studio Code".into(), target_str],
+        )
+        .await;
+    }
+    invalid(
+        "EDITOR_NOT_FOUND",
+        "Could not launch VS Code. Install the `code` command-line tool.",
+    )
+}
+
+#[tauri::command]
+async fn file_delete(repo_path: String, path: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let target = resolve_working_file(&repo, &path)?;
+    if !target.exists() {
+        return invalid("FILE_NOT_FOUND", "The file no longer exists on disk.");
+    }
+    fs::remove_file(&target)?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_export_patch(
+    repo_path: String,
+    path: String,
+    staged: bool,
+    destination: String,
+) -> CommandResult<()> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let safe = validate_file_paths(&[path])?;
+    let mut args = vec!["diff".into()];
+    if staged {
+        args.push("--cached".into());
+    }
+    args.extend(["--".into(), safe[0].clone()]);
+    let diff = run_git(Some(&repo), args).await?;
+    if diff.trim().is_empty() {
+        return invalid(
+            "EMPTY_PATCH",
+            "No diff to export for this file. Untracked files have no patch until staged.",
+        );
+    }
+    fs::write(Path::new(&destination), diff)?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn git_stash_apply(repo_path: String, stash: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_stash_ref(&stash)?;
@@ -3383,7 +3598,7 @@ async fn branch_recent_commits(repo: &Path, branch_ref: &str) -> CommandResult<V
         vec![
             "log".into(),
             "-n".into(),
-            "5".into(),
+            "200".into(),
             "--date=iso-strict".into(),
             "--pretty=format:%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%D%x1e".into(),
             branch_ref.to_string(),
@@ -6327,6 +6542,15 @@ pub fn run() {
             repo_open,
             repo_clone,
             repo_status,
+            git_identity_get,
+            git_identity_set,
+            git_stash_push_paths,
+            git_ignore_add,
+            git_export_patch,
+            file_show_in_folder,
+            file_open_default,
+            file_open_in_editor,
+            file_delete,
             git_commit_search,
             git_commit_lookup,
             git_commit_page,

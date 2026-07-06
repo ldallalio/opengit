@@ -1,5 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import type { BranchInspection, BranchStack, Commit, CommitFile, GitProvider, ParallelLane, ProviderAccountStatus, ProviderRepoCatalog, RepoSnapshot } from "@opengit/core";
 import { demoBranchInspection, demoCommitFiles, demoDiff, demoProviderCatalog, demoSnapshot } from "./demo";
 
@@ -122,6 +122,17 @@ export async function chooseCloneRootFolder(): Promise<string | null> {
 
 export const refreshRepo = (repoPath: string, historyLimit?: number) =>
   call<RepoSnapshot>("repo_status", { repoPath, historyLimit }, demoSnapshot);
+
+export type GitIdentity = {
+  name: string | null;
+  email: string | null;
+};
+
+export const getGlobalGitIdentity = () =>
+  call<GitIdentity>("git_identity_get", {}, { name: "Demo User", email: "demo@example.com" });
+
+export const setGlobalGitIdentity = (name: string, email: string) =>
+  call<GitIdentity>("git_identity_set", { name, email }, { name, email });
 
 export const searchCommits = (repoPath: string, query: string, historyLimit?: number) =>
   call<Commit[]>("git_commit_search", { repoPath, query, historyLimit }, demoSnapshot.commits);
@@ -308,6 +319,34 @@ export const createTag = (repoPath: string, name: string, target: string, messag
 
 export const stashPush = (repoPath: string, message: string) =>
   call<RepoSnapshot>("git_stash_push", { repoPath, message }, demoSnapshot);
+
+export const stashPushPaths = (repoPath: string, paths: string[], message: string) =>
+  call<RepoSnapshot>("git_stash_push_paths", { repoPath, paths, message }, demoSnapshot);
+
+export const ignoreAddPattern = (repoPath: string, pattern: string) =>
+  call<RepoSnapshot>("git_ignore_add", { repoPath, pattern }, demoSnapshot);
+
+export const showFileInFolder = (repoPath: string, path: string) =>
+  call<null>("file_show_in_folder", { repoPath, path }, null);
+
+export const openFileDefault = (repoPath: string, path: string) =>
+  call<null>("file_open_default", { repoPath, path }, null);
+
+export const openFileInEditor = (repoPath: string, path: string) =>
+  call<null>("file_open_in_editor", { repoPath, path }, null);
+
+export const deleteWorkingFile = (repoPath: string, path: string) =>
+  call<RepoSnapshot>("file_delete", { repoPath, path }, demoSnapshot);
+
+export const exportFilePatch = (repoPath: string, path: string, staged: boolean, destination: string) =>
+  call<null>("git_export_patch", { repoPath, path, staged, destination }, null);
+
+export async function choosePatchSavePath(defaultName: string): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return await saveDialog({ title: "Save Patch", defaultPath: defaultName });
+}
 
 export const stashApply = (repoPath: string, stash: string) =>
   call<RepoSnapshot>("git_stash_apply", { repoPath, stash }, demoSnapshot);

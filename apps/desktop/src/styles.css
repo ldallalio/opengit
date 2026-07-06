@@ -289,15 +289,44 @@ textarea:focus-visible {
 
 .repo-tabbar-profile {
   display: flex;
+  gap: 8px;
   align-items: center;
-  justify-content: flex-end;
-  min-width: 136px;
+  min-width: 0;
+  max-width: 200px;
+  border: 0;
   border-left: 1px solid var(--border);
-  padding: 0 10px;
+  background: transparent;
   color: var(--muted);
+  cursor: pointer;
+  padding: 0 12px;
   font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
+}
+
+.repo-tabbar-profile:hover,
+.repo-tabbar-profile:focus-visible {
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+.repo-tabbar-profile .profile-avatar {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  font-size: 8px;
+}
+
+.repo-tabbar-profile-name {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+.repo-tabbar-profile svg {
+  flex: none;
+  color: var(--quiet);
 }
 
 .topbar {
@@ -357,7 +386,7 @@ textarea:focus-visible {
   align-items: center;
   width: 100%;
   min-width: 0;
-  height: 46px;
+  height: 58px;
   border: 1px solid var(--border);
   background: var(--panel);
   color: var(--text);
@@ -612,11 +641,11 @@ textarea {
   display: grid;
   grid-row: 4;
   grid-template-columns:
-    var(--sidebar-track, 280px)
+    min(var(--sidebar-track, 280px), 24vw)
     var(--sidebar-handle-track, 6px)
-    minmax(420px, 1fr)
+    minmax(360px, 1fr)
     var(--detail-handle-track, 6px)
-    var(--detail-track, 340px);
+    min(var(--detail-track, 340px), 28vw);
   grid-template-rows: minmax(0, 1fr) var(--bottom-handle-track, 6px) var(--bottom-track, 260px);
   gap: 1px;
   height: 100%;
@@ -669,7 +698,8 @@ textarea {
   grid-template-rows:
     minmax(220px, var(--sidebar-branches-height, 420px))
     var(--sidebar-branches-resize-track, 6px)
-    var(--sidebar-inspector-track, minmax(220px, 270px))
+    var(--sidebar-inspector-track, minmax(220px, var(--sidebar-inspector-height, 270px)))
+    var(--sidebar-inspector-resize-track, 6px)
     var(--sidebar-workflows-track, 32px)
     minmax(32px, var(--sidebar-remotes-height, 145px))
     var(--sidebar-remotes-resize-track, 6px)
@@ -719,9 +749,9 @@ textarea {
   grid-column: 3 / span 3;
   grid-row: 3;
   grid-template-columns:
-    var(--bottom-changes-track, minmax(320px, 1fr))
+    var(--bottom-changes-track, minmax(280px, 1fr))
     6px
-    var(--bottom-operations-track, var(--bottom-operations-width, 260px));
+    var(--bottom-operations-track, min(var(--bottom-operations-width, 260px), 22vw));
   gap: 1px;
 }
 
@@ -741,6 +771,7 @@ textarea {
 
 .sidebar:has(.branch-inspector-panel.og-panel-collapsed) {
   --sidebar-inspector-track: 32px;
+  --sidebar-inspector-resize-track: 0px;
 }
 
 .sidebar:has(.sidebar-stashes-panel.og-panel-collapsed) {
@@ -753,6 +784,7 @@ textarea {
 }
 
 .sidebar:has(.sidebar-branches-panel.og-panel-collapsed) .sidebar-branches-resize,
+.sidebar:has(.branch-inspector-panel.og-panel-collapsed) .sidebar-inspector-resize,
 .sidebar:has(.sidebar-remotes-panel.og-panel-collapsed) .sidebar-remotes-resize,
 .sidebar:has(.sidebar-stashes-panel.og-panel-collapsed) .sidebar-stashes-resize {
   display: none;
@@ -1313,6 +1345,16 @@ body.resizing-layout-horizontal {
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.branch-inspector-count {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  letter-spacing: 0;
 }
 
 .branch-inspector-commits,
@@ -2928,7 +2970,7 @@ body.resizing-layout-horizontal {
 
 .changes-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
 }
@@ -2968,9 +3010,13 @@ body.resizing-layout-horizontal {
 }
 
 .change-column-header .og-button {
+  overflow: hidden;
+  min-width: 0;
   height: 24px;
   padding: 0 8px;
   font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .change-column-header .bulk-action-button.stage-all {
@@ -3856,14 +3902,26 @@ body.resizing-layout-horizontal {
   padding: 0 9px;
 }
 
-.profile-card strong {
-  display: grid;
-  place-items: center;
+.profile-card {
+  grid-template-columns: 22px minmax(0, 1fr) 13px;
+  cursor: pointer;
+}
+
+.profile-card:hover,
+.profile-card:focus-visible {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.profile-card .profile-avatar {
   width: 22px;
   height: 22px;
-  background: var(--accent-strong);
-  color: #fff;
-  font-size: 10px;
+  border-radius: 5px;
+  font-size: 8px;
+}
+
+.profile-card > svg {
+  color: var(--quiet);
 }
 
 .profile-card span,
@@ -4063,6 +4121,148 @@ body.resizing-layout-horizontal {
   margin: 0;
   font-size: 9px;
   text-transform: uppercase;
+}
+
+.preference-lead {
+  margin: 0 0 14px;
+  max-width: 720px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.profile-table-head,
+.profile-row {
+  display: grid;
+  grid-template-columns: 40px minmax(140px, 0.8fr) minmax(140px, 1fr) minmax(180px, 1.2fr) 64px;
+  gap: 10px;
+  align-items: center;
+}
+
+.profile-table-head {
+  min-height: 30px;
+  border-bottom: 1px solid var(--border);
+  color: var(--quiet);
+  padding: 0 12px;
+  font-size: 9px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.profile-row {
+  grid-template-columns: minmax(0, 1fr) 64px;
+  border-bottom: 1px solid var(--row-separator);
+}
+
+.profile-row:last-child {
+  border-bottom: 0;
+}
+
+.profile-row.active {
+  border-left: 2px solid #58a6ff;
+  background: var(--panel-3);
+}
+
+.profile-row-main {
+  display: grid;
+  grid-template-columns: 40px minmax(140px, 0.8fr) minmax(140px, 1fr) minmax(180px, 1.2fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 12px;
+  text-align: left;
+}
+
+.profile-row.active .profile-row-main {
+  padding-left: 10px;
+}
+
+.profile-row-main:hover {
+  background: var(--panel);
+}
+
+.profile-row-main strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-row-main > span:not(.profile-avatar) {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-row-actions {
+  display: inline-flex;
+  gap: 4px;
+  justify-content: flex-end;
+  padding-right: 8px;
+}
+
+.profile-avatar {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  color: #0d1117;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.profile-avatar.large {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  font-size: 17px;
+}
+
+.profile-active-check {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #58a6ff;
+  color: #0d1117;
+}
+
+.profile-dialog-identity {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.profile-color-picker {
+  display: flex;
+  gap: 8px;
+}
+
+.profile-color-swatch {
+  width: 20px;
+  height: 20px;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+}
+
+.profile-color-swatch.active {
+  border-color: var(--text);
 }
 
 .repo-pref-row {
@@ -4521,26 +4721,26 @@ body.resizing-layout-horizontal {
 @media (max-width: 1180px) {
   .content-grid {
     grid-template-columns:
-      var(--sidebar-track, 236px)
+      min(var(--sidebar-track, 236px), 21vw)
       var(--sidebar-handle-track, 6px)
-      minmax(360px, 1fr)
+      minmax(320px, 1fr)
       var(--detail-handle-track, 6px)
-      var(--detail-track, 300px);
+      min(var(--detail-track, 300px), 25vw);
   }
 
   .bottom-area {
     grid-template-columns:
-      var(--bottom-changes-track, minmax(280px, 1fr))
+      var(--bottom-changes-track, minmax(260px, 1fr))
       6px
-      var(--bottom-operations-track, var(--bottom-operations-width, 240px));
+      var(--bottom-operations-track, min(var(--bottom-operations-width, 240px), 20vw));
   }
 
   .content-grid.sidebar-collapsed {
     grid-template-columns:
       0
       0
-      minmax(360px, 1fr)
+      minmax(320px, 1fr)
       var(--detail-handle-track, 6px)
-      var(--detail-track, 300px);
+      min(var(--detail-track, 300px), 25vw);
   }
 }

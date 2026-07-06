@@ -67,6 +67,7 @@ import {
   Terminal,
   Trash2,
   UploadCloud,
+  UsersRound,
   X
 } from "lucide-react";
 import { clsx } from "clsx";
@@ -94,9 +95,19 @@ import {
   discardPaths,
   fetchRepo,
   clearAzureDevOpsPat,
+  choosePatchSavePath,
+  deleteWorkingFile,
+  exportFilePatch,
   getCommitFileDiff,
   getCommitFiles,
   getConflictVersions,
+  getGlobalGitIdentity,
+  setGlobalGitIdentity,
+  ignoreAddPattern,
+  openFileDefault,
+  openFileInEditor,
+  showFileInFolder,
+  stashPushPaths,
   generateAiBranchName,
   generateAiCommitMessage,
   generateAiPrDescription,
@@ -163,6 +174,7 @@ type ResizeTarget =
   | "detail"
   | "bottom"
   | "sidebarBranches"
+  | "sidebarInspector"
   | "sidebarRemotes"
   | "sidebarStashes"
   | "detailSelection"
@@ -172,6 +184,7 @@ type LayoutState = {
   detailWidth: number;
   bottomHeight: number;
   sidebarBranchesHeight: number;
+  sidebarInspectorHeight: number;
   sidebarRemotesHeight: number;
   sidebarStashesHeight: number;
   detailSelectionHeight: number;
@@ -217,6 +230,44 @@ type PushRecoveryState = {
   remote?: string;
   branch?: string;
 };
+type FileMenuState = {
+  x: number;
+  y: number;
+  change: FileChange;
+  staged: boolean;
+};
+type FileMenuAction =
+  | "stage"
+  | "unstage"
+  | "discard"
+  | "stash"
+  | "ignore-file"
+  | "ignore-ext"
+  | "ignore-folder"
+  | "open-editor"
+  | "open-default"
+  | "reveal"
+  | "copy-path"
+  | "create-patch"
+  | "delete";
+type FileMenuItem =
+  | { type: "separator"; key: string }
+  | { type: "item"; action: FileMenuAction; label: string; danger?: boolean };
+
+function fileExtension(path: string) {
+  const base = path.split("/").pop() ?? "";
+  const index = base.lastIndexOf(".");
+  return index > 0 ? base.slice(index + 1) : null;
+}
+
+function parentDirectory(path: string) {
+  const index = path.lastIndexOf("/");
+  return index > 0 ? path.slice(0, index) : null;
+}
+
+function fileBasename(path: string) {
+  return path.split("/").pop() ?? path;
+}
 type PromptRequest = {
   title: string;
   label?: string;
@@ -325,6 +376,7 @@ const defaultLayout: LayoutState = {
   detailWidth: 380,
   bottomHeight: 240,
   sidebarBranchesHeight: 420,
+  sidebarInspectorHeight: 270,
   sidebarRemotesHeight: 145,
   sidebarStashesHeight: 145,
   detailSelectionHeight: 220,
@@ -333,6 +385,83 @@ const defaultLayout: LayoutState = {
   detailCollapsed: false,
   bottomCollapsed: false
 };
+
+type GitProfile = {
+  id: string;
+  name: string;
+  authorName: string;
+  authorEmail: string;
+  color: string;
+};
+
+const gitProfileColors = ["#3fb68b", "#58a6ff", "#bc8cff", "#f778ba", "#e3b341", "#f0883e"];
+const gitProfilesStorageKey = "opengit:profiles";
+const activeGitProfileStorageKey = "opengit:activeProfile";
+const gitProfileSyncStorageKey = "opengit:profileSyncGitConfig";
+
+function defaultGitProfiles(): GitProfile[] {
+  return [
+    {
+      id: "default",
+      name: "Default Profile",
+      authorName: "",
+      authorEmail: "",
+      color: gitProfileColors[0]
+    }
+  ];
+}
+
+function loadGitProfiles(): GitProfile[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(gitProfilesStorageKey) ?? "[]");
+    if (!Array.isArray(parsed)) return defaultGitProfiles();
+    const profiles = parsed.filter(
+      (value): value is GitProfile =>
+        typeof value === "object" &&
+        value !== null &&
+        typeof value.id === "string" &&
+        typeof value.name === "string" &&
+        typeof value.authorName === "string" &&
+        typeof value.authorEmail === "string" &&
+        typeof value.color === "string"
+    );
+    return profiles.length > 0 ? profiles : defaultGitProfiles();
+  } catch {
+    return defaultGitProfiles();
+  }
+}
+
+function profileInitials(profile: GitProfile) {
+  const source = profile.authorName.trim() || profile.name.trim();
+  const parts = source.split(/\s+/).filter(Boolean);
+  const first = parts[0]?.[0] ?? "?";
+  const second = parts.length > 1 ? parts[parts.length - 1]?.[0] ?? "" : parts[0]?.[1] ?? "";
+  return `${first}${second}`.toUpperCase();
+}
+
+const gitProfilesChangedEvent = "opengit:profiles-changed";
+
+function readActiveGitProfile(): GitProfile | null {
+  const profiles = loadGitProfiles();
+  const activeId = localStorage.getItem(activeGitProfileStorageKey);
+  return profiles.find((profile) => profile.id === activeId) ?? profiles[0] ?? null;
+}
+
+function useActiveGitProfile() {
+  const [profile, setProfile] = useState<GitProfile | null>(readActiveGitProfile);
+
+  useEffect(() => {
+    const update = () => setProfile(readActiveGitProfile());
+    window.addEventListener(gitProfilesChangedEvent, update);
+    window.addEventListener("storage", update);
+    return () => {
+      window.removeEventListener(gitProfilesChangedEvent, update);
+      window.removeEventListener("storage", update);
+    };
+  }, []);
+
+  return profile;
+}
 
 function loadRecentRepos() {
   try {
@@ -557,6 +686,7 @@ export default function App() {
   const [historyPagingExhausted, setHistoryPagingExhausted] = useState(false);
   const [historyPageLoading, setHistoryPageLoading] = useState(false);
   const [branchMenu, setBranchMenu] = useState<BranchMenuState | null>(null);
+  const [fileMenu, setFileMenu] = useState<FileMenuState | null>(null);
   const [branchSwitcherOpen, setBranchSwitcherOpen] = useState(false);
   const [branchSearch, setBranchSearch] = useState("");
   const [operationLog, setOperationLog] = useState<string[]>([
@@ -650,6 +780,7 @@ export default function App() {
     "--bottom-track": layout.bottomCollapsed ? "0px" : hasWorkingChanges ? `${layout.bottomHeight}px` : "44px",
     "--bottom-handle-track": layout.bottomCollapsed ? "0px" : "6px",
     "--sidebar-branches-height": `${layout.sidebarBranchesHeight}px`,
+    "--sidebar-inspector-height": `${layout.sidebarInspectorHeight}px`,
     "--sidebar-remotes-height": `${layout.sidebarRemotesHeight}px`,
     "--sidebar-stashes-height": `${layout.sidebarStashesHeight}px`,
     "--detail-selection-height": `${layout.detailSelectionHeight}px`,
@@ -808,6 +939,24 @@ export default function App() {
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, [branchMenu]);
+
+  useEffect(() => {
+    if (!fileMenu) return;
+
+    const closeMenu = () => setFileMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setFileMenu(null);
+      }
+    };
+
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [fileMenu]);
 
   useEffect(() => {
     if (!branchSwitcherOpen) return;
@@ -1308,6 +1457,95 @@ export default function App() {
     });
   };
 
+  const openFileMenu = (change: FileChange, staged: boolean, event: ReactMouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const menuWidth = 320;
+    const menuHeight = 520;
+    setBranchMenu(null);
+    setFileMenu({
+      change,
+      staged,
+      x: clamp(event.clientX, 8, Math.max(8, window.innerWidth - menuWidth - 8)),
+      y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - menuHeight - 8))
+    });
+  };
+
+  const runFileMenuAction = async (action: FileMenuAction, menu: FileMenuState) => {
+    setFileMenu(null);
+    const { change, staged } = menu;
+    const repo = requireRepo();
+    if (!repo) return;
+
+    switch (action) {
+      case "stage":
+        fileAction("Stage", change, stagePaths);
+        break;
+      case "unstage":
+        fileAction("Unstage", change, unstagePaths);
+        break;
+      case "discard":
+        if (window.confirm(`Discard '${change.path}'?`)) {
+          fileAction("Discard", change, discardPaths);
+        }
+        break;
+      case "stash":
+        void runSnapshotOperation("Stash file", () => stashPushPaths(repo, [change.path], `OpenGit: stash ${change.path}`));
+        break;
+      case "ignore-file":
+        void runSnapshotOperation("Ignore file", () => ignoreAddPattern(repo, `/${change.path}`));
+        break;
+      case "ignore-ext": {
+        const extension = fileExtension(change.path);
+        if (extension) {
+          void runSnapshotOperation("Ignore extension", () => ignoreAddPattern(repo, `*.${extension}`));
+        }
+        break;
+      }
+      case "ignore-folder": {
+        const directory = parentDirectory(change.path);
+        if (directory) {
+          void runSnapshotOperation("Ignore folder", () => ignoreAddPattern(repo, `/${directory}/`));
+        }
+        break;
+      }
+      case "open-editor":
+        openFileInEditor(repo, change.path).catch((error) => setError(error instanceof Error ? error.message : String(error)));
+        break;
+      case "open-default":
+        openFileDefault(repo, change.path).catch((error) => setError(error instanceof Error ? error.message : String(error)));
+        break;
+      case "reveal":
+        showFileInFolder(repo, change.path).catch((error) => setError(error instanceof Error ? error.message : String(error)));
+        break;
+      case "copy-path":
+        try {
+          await navigator.clipboard.writeText(`${repo}/${change.path}`);
+          setOperationLog((log) => [`Copied path for ${fileBasename(change.path)}`, ...log].slice(0, 8));
+        } catch {
+          setError("Clipboard is unavailable in this environment.");
+        }
+        break;
+      case "create-patch": {
+        const destination = await choosePatchSavePath(`${fileBasename(change.path)}.patch`);
+        if (!destination) return;
+        try {
+          await exportFilePatch(repo, change.path, staged, destination);
+          setOperationLog((log) => [`Saved patch to ${destination}`, ...log].slice(0, 8));
+        } catch (error) {
+          setError(error instanceof Error ? error.message : String(error));
+        }
+        break;
+      }
+      case "delete":
+        if (window.confirm(`Delete '${change.path}' from disk? Untracked files cannot be recovered by Git.`)) {
+          void runSnapshotOperation("Delete file", () => deleteWorkingFile(repo, change.path));
+        }
+        break;
+    }
+  };
+
   const selectBranchForInspection = (target: BranchMenuTarget | DisplayBranch | Branch) => {
     setSelectedBranchRef(branchRefForInspection(target));
   };
@@ -1587,7 +1825,7 @@ export default function App() {
     const startY = event.clientY;
     const initial = layout;
     const resizeClass =
-      target === "bottom" || target === "sidebarBranches" || target === "sidebarRemotes" || target === "sidebarStashes" || target === "detailSelection"
+      target === "bottom" || target === "sidebarBranches" || target === "sidebarInspector" || target === "sidebarRemotes" || target === "sidebarStashes" || target === "detailSelection"
         ? "resizing-layout-horizontal"
         : "resizing-layout-vertical";
 
@@ -1601,6 +1839,7 @@ export default function App() {
         if (target === "detail") next.detailWidth = clamp(initial.detailWidth - deltaX, 260, 680);
         if (target === "bottom") next.bottomHeight = clamp(initial.bottomHeight - deltaY, 150, 520);
         if (target === "sidebarBranches") next.sidebarBranchesHeight = clamp(initial.sidebarBranchesHeight + deltaY, 180, 760);
+        if (target === "sidebarInspector") next.sidebarInspectorHeight = clamp(initial.sidebarInspectorHeight + deltaY, 180, 760);
         if (target === "sidebarRemotes") next.sidebarRemotesHeight = clamp(initial.sidebarRemotesHeight + deltaY, 80, 360);
         if (target === "sidebarStashes") next.sidebarStashesHeight = clamp(initial.sidebarStashesHeight + deltaY, 80, 360);
         if (target === "detailSelection") next.detailSelectionHeight = clamp(initial.detailSelectionHeight + deltaY, 120, 460);
@@ -2240,6 +2479,10 @@ export default function App() {
           onAdd={browseForRepository}
           onOpenRepositoryManagement={openRepositoryManagement}
           onOpenPalette={() => setPaletteOpen(true)}
+          onOpenProfiles={() => {
+            setPreferencesSection("profiles");
+            setPreferencesOpen(true);
+          }}
         />
 
         <header className="topbar">
@@ -2810,6 +3053,7 @@ export default function App() {
                       laneForChange={(change) => (parallelMode || snapshot.parallelLanes.length > 0 ? laneByPath.get(change.path) : undefined)}
                       assignLane={parallelMode ? assignChangeToLane : undefined}
                       createLaneFromChange={parallelMode ? (change) => createLaneFromChanges([change]) : undefined}
+                      onFileMenu={(change, event) => openFileMenu(change, false, event)}
                     />
                     <ChangeColumn
                       title={`Staged (${laneFilteredStagedChanges.length})`}
@@ -2829,6 +3073,7 @@ export default function App() {
                       laneForChange={(change) => (parallelMode || snapshot.parallelLanes.length > 0 ? laneByPath.get(change.path) : undefined)}
                       assignLane={parallelMode ? assignChangeToLane : undefined}
                       createLaneFromChange={parallelMode ? (change) => createLaneFromChanges([change]) : undefined}
+                      onFileMenu={(change, event) => openFileMenu(change, true, event)}
                     />
                   </div>
                 </div>
@@ -2864,6 +3109,14 @@ export default function App() {
           snapshot={snapshot}
           onAction={handleBranchMenuAction}
           onClose={() => setBranchMenu(null)}
+        />
+      )}
+
+      {fileMenu && (
+        <FileContextMenu
+          state={fileMenu}
+          onAction={(action) => void runFileMenuAction(action, fileMenu)}
+          onClose={() => setFileMenu(null)}
         />
       )}
 
@@ -3036,7 +3289,8 @@ function RepoTabStrip({
   onClose,
   onAdd,
   onOpenRepositoryManagement,
-  onOpenPalette
+  onOpenPalette,
+  onOpenProfiles
 }: {
   tabs: string[];
   activePath: string;
@@ -3046,7 +3300,10 @@ function RepoTabStrip({
   onAdd: () => void;
   onOpenRepositoryManagement: () => void;
   onOpenPalette: () => void;
+  onOpenProfiles: () => void;
 }) {
+  const activeProfile = useActiveGitProfile();
+
   return (
     <div className="repo-tabbar" aria-label="Open repositories">
       <div className="repo-tabbar-actions">
@@ -3087,9 +3344,13 @@ function RepoTabStrip({
           <Plus size={15} />
         </button>
       </div>
-      <div className="repo-tabbar-profile">
-        <span>Default Profile</span>
-      </div>
+      <button className="repo-tabbar-profile" type="button" onClick={onOpenProfiles} title="Manage profiles">
+        <span className="profile-avatar" style={{ background: activeProfile?.color }}>
+          {activeProfile ? profileInitials(activeProfile) : "?"}
+        </span>
+        <span className="repo-tabbar-profile-name">{activeProfile?.name ?? "Profiles"}</span>
+        <ChevronDown size={13} />
+      </button>
     </div>
   );
 }
@@ -3141,6 +3402,78 @@ function BranchContextMenu({
             >
               <span>{item.label}</span>
               {item.hint && <small>{item.hint}</small>}
+            </button>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FileContextMenu({
+  state,
+  onAction,
+  onClose
+}: {
+  state: FileMenuState;
+  onAction: (action: FileMenuAction) => void;
+  onClose: () => void;
+}) {
+  const { change, staged } = state;
+  const extension = fileExtension(change.path);
+  const directory = parentDirectory(change.path);
+  const items: FileMenuItem[] = [
+    { type: "item", action: staged ? "unstage" : "stage", label: staged ? "Unstage" : "Stage" },
+    { type: "item", action: "discard", label: "Discard changes", danger: true },
+    { type: "item", action: "stash", label: "Stash file" },
+    { type: "separator", key: "sep-ignore" },
+    { type: "item", action: "ignore-file", label: "Ignore this file" },
+    ...(extension ? [{ type: "item", action: "ignore-ext", label: `Ignore all *.${extension} files` } as FileMenuItem] : []),
+    ...(directory ? [{ type: "item", action: "ignore-folder", label: `Ignore folder '${directory}'` } as FileMenuItem] : []),
+    { type: "separator", key: "sep-open" },
+    { type: "item", action: "open-editor", label: "Open in VS Code" },
+    { type: "item", action: "open-default", label: "Open file in default program" },
+    { type: "item", action: "reveal", label: "Show in Finder" },
+    { type: "separator", key: "sep-copy" },
+    { type: "item", action: "copy-path", label: "Copy file path" },
+    { type: "item", action: "create-patch", label: "Create patch from file changes" },
+    { type: "separator", key: "sep-danger" },
+    { type: "item", action: "delete", label: "Delete file", danger: true }
+  ];
+  const menuStyle = {
+    left: state.x,
+    top: state.y,
+    maxHeight: `calc(100vh - ${state.y + 12}px)`
+  } as CSSProperties;
+
+  return (
+    <div
+      className="branch-context-menu"
+      style={menuStyle}
+      role="menu"
+      aria-label={`${change.path} actions`}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <div className="branch-context-menu-header">
+        <span className={clsx("status-chip", change.status)}>{statusLabel(change)}</span>
+        <strong title={change.path}>{fileBasename(change.path)}</strong>
+        <IconButton label="Close file menu" onClick={onClose}>
+          <X size={13} />
+        </IconButton>
+      </div>
+      <div className="branch-context-menu-list">
+        {items.map((item) =>
+          item.type === "separator" ? (
+            <div key={item.key} className="branch-menu-separator" role="separator" />
+          ) : (
+            <button
+              key={`${item.action}-${item.label}`}
+              type="button"
+              role="menuitem"
+              className={clsx(item.danger && "danger")}
+              onClick={() => onAction(item.action)}
+            >
+              <span>{item.label}</span>
             </button>
           )
         )}
@@ -3508,6 +3841,12 @@ function Sidebar({
           onSelectCommit={selectCommitBySha}
         />
       </Panel>
+      <ResizeHandle
+        className="sidebar-section-resize sidebar-inspector-resize"
+        label="Resize branch inspector section"
+        orientation="horizontal"
+        onPointerDown={(event) => startResize("sidebarInspector", event)}
+      />
 
       <Panel
         title="Workflows"
@@ -3868,10 +4207,13 @@ function BranchInspector({
         </div>
       )}
 
-      <section className="branch-inspector-section">
+      <section className="branch-inspector-section branch-inspector-commits-section">
         <div className="branch-inspector-section-heading">
           <GitCommitHorizontal size={13} />
-          <span>Recent Activity</span>
+          <span>Commits</span>
+          {inspection.recentCommits.length > 0 && (
+            <em className="branch-inspector-count">{inspection.recentCommits.length}{inspection.recentCommits.length >= 200 ? "+" : ""}</em>
+          )}
         </div>
         <div className="branch-inspector-commits">
           {inspection.recentCommits.length > 0 ? (
@@ -3884,6 +4226,9 @@ function BranchInspector({
             ))
           ) : (
             <span className="branch-inspector-muted">No commits found.</span>
+          )}
+          {inspection.recentCommits.length >= 200 && (
+            <small className="branch-inspector-muted">Showing the latest 200. Use the history graph for the full log.</small>
           )}
         </div>
       </section>
@@ -4730,7 +5075,8 @@ function ChangeColumn({
   secondaryAction,
   laneForChange,
   assignLane,
-  createLaneFromChange
+  createLaneFromChange,
+  onFileMenu
 }: {
   title: string;
   changes: FileChange[];
@@ -4745,6 +5091,7 @@ function ChangeColumn({
   laneForChange?: (change: FileChange) => ParallelLane | undefined;
   assignLane?: (change: FileChange) => void;
   createLaneFromChange?: (change: FileChange) => void;
+  onFileMenu?: (change: FileChange, event: ReactMouseEvent<HTMLElement>) => void;
 }) {
   const emptyLabel = title.toLowerCase().startsWith("staged") ? "No staged changes" : "No unstaged changes";
 
@@ -4766,6 +5113,7 @@ function ChangeColumn({
               role="button"
               tabIndex={0}
               onClick={() => onSelect(change)}
+              onContextMenu={(event) => onFileMenu?.(change, event)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
@@ -5488,6 +5836,13 @@ function PreferencesPanel({
   openRepositoryManagement: () => void;
 }) {
   const [integration, setIntegration] = useState("OpenAI");
+  const [profiles, setProfiles] = useState<GitProfile[]>(loadGitProfiles);
+  const [activeProfileId, setActiveProfileId] = useState(
+    () => localStorage.getItem(activeGitProfileStorageKey) ?? loadGitProfiles()[0]?.id ?? "default"
+  );
+  const [syncGitConfig, setSyncGitConfig] = useState(() => localStorage.getItem(gitProfileSyncStorageKey) !== "false");
+  const [profileDialog, setProfileDialog] = useState<{ mode: "create" } | { mode: "edit"; profile: GitProfile } | null>(null);
+  const [profileMessage, setProfileMessage] = useState<string | null>(null);
   const [openAiKey, setOpenAiKey] = useState("");
   const [openAiBusy, setOpenAiBusy] = useState(false);
   const [openAiMessage, setOpenAiMessage] = useState<string | null>(null);
@@ -5509,8 +5864,95 @@ function PreferencesPanel({
   useEffect(() => {
     setIntegration(availableIntegrations.some((item) => item.label === preferredIntegration) ? preferredIntegration : "OpenAI");
   }, [preferredIntegration]);
+
+  useEffect(() => {
+    localStorage.setItem(gitProfilesStorageKey, JSON.stringify(profiles));
+    window.dispatchEvent(new Event(gitProfilesChangedEvent));
+  }, [profiles]);
+
+  useEffect(() => {
+    localStorage.setItem(activeGitProfileStorageKey, activeProfileId);
+    window.dispatchEvent(new Event(gitProfilesChangedEvent));
+  }, [activeProfileId]);
+
+  useEffect(() => {
+    localStorage.setItem(gitProfileSyncStorageKey, String(syncGitConfig));
+  }, [syncGitConfig]);
+
+  useEffect(() => {
+    if (!runningInTauri) return;
+    const needsSeed = profiles.some((profile) => profile.id === "default" && !profile.authorName && !profile.authorEmail);
+    if (!needsSeed) return;
+    void getGlobalGitIdentity()
+      .then((identity) => {
+        if (!identity.name && !identity.email) return;
+        setProfiles((current) =>
+          current.map((profile) =>
+            profile.id === "default" && !profile.authorName && !profile.authorEmail
+              ? { ...profile, authorName: identity.name ?? "", authorEmail: identity.email ?? "" }
+              : profile
+          )
+        );
+      })
+      .catch(() => undefined);
+  }, [runningInTauri, profiles]);
+
+  const activeProfile = profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0];
+
+  const applyProfileIdentity = async (profile: GitProfile, context: string) => {
+    if (!syncGitConfig) {
+      setProfileMessage(`${context} .gitconfig sync is off, so git identity was not changed.`);
+      return;
+    }
+    if (!runningInTauri) {
+      setProfileMessage(`${context} Browser preview cannot write .gitconfig — open the desktop window to sync.`);
+      return;
+    }
+    if (!profile.authorName.trim() || !profile.authorEmail.trim()) {
+      setProfileMessage(`${context} Set an author name and email to sync .gitconfig.`);
+      return;
+    }
+    try {
+      await setGlobalGitIdentity(profile.authorName, profile.authorEmail);
+      setProfileMessage(`${context} Global .gitconfig now uses ${profile.authorName} <${profile.authorEmail}>.`);
+    } catch (error) {
+      setProfileMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const activateProfile = (profile: GitProfile) => {
+    setActiveProfileId(profile.id);
+    void applyProfileIdentity(profile, `Switched to ${profile.name}.`);
+  };
+
+  const saveProfile = (values: Omit<GitProfile, "id">, existingId?: string) => {
+    if (existingId) {
+      const updated = { ...values, id: existingId };
+      setProfiles((current) => current.map((profile) => (profile.id === existingId ? updated : profile)));
+      if (existingId === activeProfileId) {
+        void applyProfileIdentity(updated, `Updated ${updated.name}.`);
+      }
+    } else {
+      const created = { ...values, id: crypto.randomUUID() };
+      setProfiles((current) => [...current, created]);
+    }
+    setProfileDialog(null);
+  };
+
+  const deleteProfile = (id: string) => {
+    setProfiles((current) => {
+      if (current.length <= 1) return current;
+      const remaining = current.filter((profile) => profile.id !== id);
+      if (id === activeProfileId && remaining[0]) {
+        setActiveProfileId(remaining[0].id);
+      }
+      return remaining;
+    });
+  };
+
   const sections: Array<{ id: PreferenceSection; label: string; icon: typeof Settings }> = [
     { id: "general", label: "General", icon: Settings },
+    { id: "profiles", label: "Profiles", icon: UsersRound },
     { id: "repositories", label: "Repositories", icon: FolderOpen },
     { id: "integrations", label: "Integrations", icon: Plug }
   ];
@@ -5527,10 +5969,13 @@ function PreferencesPanel({
           <strong>{activeSectionTitle}</strong>
         </div>
         <div className="preferences-context">
-          <div className="profile-card">
-            <strong>LD</strong>
-            <span>Default Profile</span>
-          </div>
+          <button className="profile-card" onClick={() => setSection("profiles")} title="Manage profiles">
+            <span className="profile-avatar" style={{ background: activeProfile?.color }}>
+              {activeProfile ? profileInitials(activeProfile) : "?"}
+            </span>
+            <span>{activeProfile?.name ?? "No profile"}</span>
+            <ChevronDown size={13} />
+          </button>
           <button className="preferences-repo-chip" onClick={() => setSection("repositories")}>
             <FolderOpen size={14} />
             <span>{snapshot ? snapshot.repository.name : "No repo open"}</span>
@@ -5575,6 +6020,81 @@ function PreferencesPanel({
             <SettingRow label="Runtime" description={runningInTauri ? "Desktop mode with native Git access." : "Browser preview with demo data."}>
               <span className="settings-pill">{runningInTauri ? "desktop" : "browser preview"}</span>
             </SettingRow>
+          </PreferenceSection>
+        )}
+
+        {section === "profiles" && (
+          <PreferenceSection title="Profiles">
+            <p className="preference-lead">
+              Profiles store your commit author identity so you can switch between work and personal setups. The active profile can keep
+              your global git config in sync.
+            </p>
+            <SettingRow
+              label="Keep my .gitconfig updated"
+              description="When checked, switching profiles writes user.name and user.email to your global .gitconfig."
+            >
+              <input
+                type="checkbox"
+                checked={syncGitConfig}
+                onChange={(event) => setSyncGitConfig(event.target.checked)}
+                aria-label="Keep .gitconfig updated with the active profile"
+              />
+            </SettingRow>
+            <div className="settings-list">
+              <div className="settings-list-header">
+                <h3>My Profiles</h3>
+                <Button variant="primary" onClick={() => setProfileDialog({ mode: "create" })}>
+                  <Plus size={14} />
+                  Add a Profile
+                </Button>
+              </div>
+              <div className="profile-table-head" aria-hidden="true">
+                <span />
+                <span>Profile Name</span>
+                <span>Author Name</span>
+                <span>Author Email</span>
+                <span />
+              </div>
+              {profiles.map((profile) => {
+                const isActive = profile.id === activeProfileId;
+                return (
+                  <div key={profile.id} className={clsx("profile-row", isActive && "active")}>
+                    <button
+                      type="button"
+                      className="profile-row-main"
+                      onClick={() => activateProfile(profile)}
+                      aria-pressed={isActive}
+                      title={isActive ? `${profile.name} is active` : `Switch to ${profile.name}`}
+                    >
+                      <span className="profile-avatar" style={{ background: profile.color }}>
+                        {profileInitials(profile)}
+                        {isActive && (
+                          <em className="profile-active-check">
+                            <Check size={9} />
+                          </em>
+                        )}
+                      </span>
+                      <strong>{profile.name}</strong>
+                      <span>{profile.authorName || "—"}</span>
+                      <span>{profile.authorEmail || "—"}</span>
+                    </button>
+                    <div className="profile-row-actions">
+                      <IconButton label={`Edit ${profile.name}`} onClick={() => setProfileDialog({ mode: "edit", profile })}>
+                        <SquarePen size={13} />
+                      </IconButton>
+                      <IconButton
+                        label={`Delete ${profile.name}`}
+                        onClick={() => deleteProfile(profile.id)}
+                        disabled={profiles.length <= 1}
+                      >
+                        <Trash2 size={13} />
+                      </IconButton>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {profileMessage && <div className="settings-note">{profileMessage}</div>}
           </PreferenceSection>
         )}
 
@@ -5799,7 +6319,7 @@ function PreferencesPanel({
           </PreferenceSection>
         )}
 
-        {section !== "general" && section !== "repositories" && section !== "integrations" && (
+        {section !== "general" && section !== "profiles" && section !== "repositories" && section !== "integrations" && (
           <PreferenceSection title={titleForPreferenceSection(section)}>
             <div className="settings-placeholder">
               <span>This section is reserved for the next implementation pass.</span>
@@ -5808,6 +6328,120 @@ function PreferencesPanel({
           </PreferenceSection>
         )}
       </main>
+
+      {profileDialog && (
+        <ProfileDialog
+          profile={profileDialog.mode === "edit" ? profileDialog.profile : null}
+          onSave={(values) => saveProfile(values, profileDialog.mode === "edit" ? profileDialog.profile.id : undefined)}
+          onCancel={() => setProfileDialog(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ProfileDialog({
+  profile,
+  onSave,
+  onCancel
+}: {
+  profile: GitProfile | null;
+  onSave: (values: Omit<GitProfile, "id">) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(profile?.name ?? "");
+  const [authorName, setAuthorName] = useState(profile?.authorName ?? "");
+  const [authorEmail, setAuthorEmail] = useState(profile?.authorEmail ?? "");
+  const [color, setColor] = useState(profile?.color ?? gitProfileColors[1]);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    nameInputRef.current?.focus();
+    nameInputRef.current?.select();
+  }, []);
+
+  const preview: GitProfile = { id: "preview", name, authorName, authorEmail, color };
+  const canSave = name.trim().length > 0;
+
+  return (
+    <div className="prompt-backdrop" onMouseDown={onCancel}>
+      <div
+        className="prompt-dialog profile-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={profile ? "Edit profile" : "Add a profile"}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!canSave) return;
+            onSave({ name: name.trim(), authorName: authorName.trim(), authorEmail: authorEmail.trim(), color });
+          }}
+        >
+          <div className="prompt-header">
+            <h2>{profile ? "Edit Profile" : "Add a Profile"}</h2>
+            <IconButton label="Close" onClick={onCancel}>
+              <X size={14} />
+            </IconButton>
+          </div>
+
+          <div className="profile-dialog-identity">
+            <span className="profile-avatar large" style={{ background: color }}>
+              {profileInitials(preview)}
+            </span>
+            <div className="profile-color-picker" role="radiogroup" aria-label="Profile color">
+              {gitProfileColors.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  className={clsx("profile-color-swatch", option === color && "active")}
+                  style={{ background: option }}
+                  onClick={() => setColor(option)}
+                  role="radio"
+                  aria-checked={option === color}
+                  aria-label={`Profile color ${option}`}
+                />
+              ))}
+            </div>
+          </div>
+
+          <label htmlFor="profile-dialog-name">Profile Name</label>
+          <input
+            id="profile-dialog-name"
+            ref={nameInputRef}
+            value={name}
+            placeholder="Work"
+            onChange={(event) => setName(event.target.value)}
+          />
+
+          <label htmlFor="profile-dialog-author">Author Name</label>
+          <input
+            id="profile-dialog-author"
+            value={authorName}
+            placeholder="Your commit author name"
+            onChange={(event) => setAuthorName(event.target.value)}
+          />
+
+          <label htmlFor="profile-dialog-email">Author Email</label>
+          <input
+            id="profile-dialog-email"
+            value={authorEmail}
+            type="email"
+            placeholder="you@example.com"
+            onChange={(event) => setAuthorEmail(event.target.value)}
+          />
+
+          <div className="prompt-actions">
+            <Button type="button" variant="ghost" onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" disabled={!canSave}>
+              {profile ? "Save Changes" : "Create Profile"}
+            </Button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
