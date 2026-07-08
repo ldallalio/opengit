@@ -1624,6 +1624,100 @@ async fn git_branch_checkout(repo_path: String, name: String) -> CommandResult<R
     build_snapshot(&repo, None).await
 }
 
+/// Split a remote-tracking ref's short name (e.g. `origin/feature/foo`) into its
+/// remote (`origin`) and local branch name (`feature/foo`) by matching against the
+/// repository's configured remotes. Returns None if no known remote is a prefix.
+async fn split_remote_ref(repo: &Path, remote_ref: &str) -> Option<(String, String)> {
+    let remotes = run_git(Some(repo), vec!["remote".into()]).await.ok()?;
+    remotes
+        .lines()
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty())
+        .find_map(|remote| {
+            remote_ref
+                .strip_prefix(remote)
+                .and_then(|rest| rest.strip_prefix('/'))
+                .filter(|local| !local.is_empty())
+                .map(|local| (remote.to_string(), local.to_string()))
+        })
+}
+
+/// Check out a remote branch the way a Git desktop client should: create a local
+/// tracking branch when none exists, or switch to the existing local branch and
+/// fast-forward it up to the remote-tracking ref when it is a clean fast-forward.
+/// Never force-updates a diverged local branch.
+#[tauri::command]
+async fn git_branch_checkout_remote(
+    repo_path: String,
+    remote_ref: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&remote_ref, "remote branch")?;
+
+    let (_remote, local) = split_remote_ref(&repo, &remote_ref).await.ok_or_else(|| {
+        AppError::InvalidInput {
+            code: "UNKNOWN_REMOTE_BRANCH",
+            message: format!("'{remote_ref}' is not a known remote branch."),
+        }
+    })?;
+
+    let tracking_ref = format!("refs/remotes/{remote_ref}");
+    if !git_ref_exists(&repo, &tracking_ref).await {
+        return Err(AppError::InvalidInput {
+            code: "UNKNOWN_REMOTE_BRANCH",
+            message: format!("Remote branch '{remote_ref}' no longer exists. Fetch and try again."),
+        });
+    }
+
+    let local_ref = format!("refs/heads/{local}");
+    if git_ref_exists(&repo, &local_ref).await {
+        // Switch to the existing local branch, then fast-forward only if it is
+        // strictly behind the remote (local is an ancestor of the tracking ref).
+        run_git_with_safety_snapshot(
+            &repo,
+            "before checkout",
+            vec!["checkout".into(), local.clone()],
+        )
+        .await?;
+
+        let can_fast_forward = run_git(
+            Some(&repo),
+            vec![
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                local_ref,
+                tracking_ref.clone(),
+            ],
+        )
+        .await
+        .is_ok();
+
+        if can_fast_forward {
+            run_git(
+                Some(&repo),
+                vec!["merge".into(), "--ff-only".into(), tracking_ref],
+            )
+            .await?;
+        }
+    } else {
+        // No local branch yet: create one at the remote tip with tracking set.
+        run_git_with_safety_snapshot(
+            &repo,
+            "before checkout",
+            vec![
+                "switch".into(),
+                "--create".into(),
+                local,
+                "--track".into(),
+                remote_ref,
+            ],
+        )
+        .await?;
+    }
+
+    build_snapshot(&repo, None).await
+}
+
 #[tauri::command]
 async fn git_branch_delete(
     repo_path: String,
@@ -2908,10 +3002,7 @@ async fn run_git(repo: Option<&Path>, args: Vec<String>) -> CommandResult<String
         } else {
             stderr
         };
-        Err(AppError::GitFailed {
-            message: git_error_summary(&detail),
-            detail,
-        })
+        Err(git_command_failure(detail))
     }
 }
 
@@ -2953,10 +3044,7 @@ async fn run_git_with_env(
         } else {
             stderr
         };
-        Err(AppError::GitFailed {
-            message: git_error_summary(&detail),
-            detail,
-        })
+        Err(git_command_failure(detail))
     }
 }
 
@@ -4606,6 +4694,12 @@ fn parse_branches(raw: &str, ahead: i32, behind: i32) -> Vec<Branch> {
             let upstream = optional_string(parts.next().unwrap_or_default());
             let is_current = parts.next().unwrap_or_default() == "*";
 
+            // Skip the remote's symbolic HEAD pointer (e.g. `origin/HEAD`) — it is an
+            // alias, not a checkoutable branch.
+            if full_ref.starts_with("refs/remotes/") && name.ends_with("/HEAD") {
+                return None;
+            }
+
             Some(Branch {
                 name: name.clone(),
                 full_ref,
@@ -4897,6 +4991,47 @@ async fn git_dir_path(repo: &Path) -> Option<PathBuf> {
                 repo.join(git_dir)
             }
         })
+}
+
+/// Remove a stale Git lock file (e.g. `.git/index.lock`) left behind by a crashed or
+/// interrupted process, then return a fresh snapshot. Guarded so it can only ever
+/// delete a `*.lock` file that lives inside this repository's own Git directory.
+#[tauri::command]
+async fn git_clear_lock(repo_path: String, lock_path: String) -> CommandResult<RepoSnapshot> {
+    let repo = Path::new(&repo_path);
+    let lock = PathBuf::from(&lock_path);
+
+    if lock.extension().and_then(|ext| ext.to_str()) != Some("lock") {
+        return invalid(
+            "INVALID_LOCK_PATH",
+            "Refusing to remove a file that is not a Git lock.",
+        );
+    }
+
+    let git_dir = git_dir_path(repo).await.ok_or_else(|| AppError::InvalidInput {
+        code: "NOT_A_REPOSITORY",
+        message: "This folder is not a Git repository.".to_string(),
+    })?;
+    let git_dir = git_dir.canonicalize().unwrap_or(git_dir);
+    let lock_parent = lock
+        .parent()
+        .map(|parent| parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf()))
+        .unwrap_or_default();
+    if !lock_parent.starts_with(&git_dir) {
+        return invalid(
+            "INVALID_LOCK_PATH",
+            "Refusing to remove a lock file outside this repository's Git directory.",
+        );
+    }
+
+    match std::fs::remove_file(&lock) {
+        Ok(()) => {}
+        // Already gone — treat as success and just refresh.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(AppError::Io(err.to_string())),
+    }
+
+    build_snapshot(repo, None).await
 }
 
 fn validate_file_paths(paths: &[String]) -> CommandResult<Vec<String>> {
@@ -6506,6 +6641,44 @@ fn git_error_summary(detail: &str) -> String {
         .unwrap_or_else(|| "Git command failed.".to_string())
 }
 
+/// Git prints `Unable to create '<path>.lock': File exists` when a prior process
+/// left a lock behind (or one is genuinely still running). Pull the lock path out
+/// so the app can offer to clear it instead of dead-ending the user in a terminal.
+fn locked_path_from_detail(detail: &str) -> Option<String> {
+    let marker = "Unable to create '";
+    let start = detail.find(marker)? + marker.len();
+    let rest = &detail[start..];
+    let end = rest.find('\'')?;
+    let path = &rest[..end];
+    if path.ends_with(".lock") && detail.contains("File exists") {
+        Some(path.to_string())
+    } else {
+        None
+    }
+}
+
+/// Build the error for a failed git invocation, upgrading the stale-lock case to an
+/// actionable error the UI can recover from with a single click.
+fn git_command_failure(detail: String) -> AppError {
+    if let Some(lock_path) = locked_path_from_detail(&detail) {
+        let label = Path::new(&lock_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("index.lock");
+        return AppError::GitActionRequired {
+            code: "GIT_LOCK_EXISTS",
+            message: format!(
+                "A Git lock file ({label}) is blocking this repository. Another Git process may be running — if you're sure none is, clear the lock and try again."
+            ),
+            detail,
+        };
+    }
+    AppError::GitFailed {
+        message: git_error_summary(&detail),
+        detail,
+    }
+}
+
 fn is_actionable_git_error_line(line: &str) -> bool {
     if line.is_empty() {
         return false;
@@ -6576,6 +6749,7 @@ pub fn run() {
             git_undo_restore,
             git_branch_create,
             git_branch_checkout,
+            git_branch_checkout_remote,
             git_branch_delete,
             git_branch_rename,
             git_branch_inspect,
@@ -6617,7 +6791,8 @@ pub fn run() {
             git_stash_drop,
             git_diff,
             git_commit_files,
-            git_commit_file_diff
+            git_commit_file_diff,
+            git_clear_lock
         ])
         .run(tauri::generate_context!())
         .expect("error while running OpenGit");
@@ -7199,6 +7374,186 @@ mod tests {
             .as_str()
             .expect("message")
             .contains("max_output_tokens"));
+    }
+
+    /// Build a bare "remote" and a working clone wired to it, returning the clone path.
+    fn init_clone_with_remote(name: &str) -> (PathBuf, PathBuf) {
+        let origin = std::env::temp_dir().join(format!("opengit-{name}-origin-{}", now_millis()));
+        fs::create_dir_all(&origin).expect("origin dir");
+        run_git_test(&origin, &["init", "--bare"]);
+
+        let seed = std::env::temp_dir().join(format!("opengit-{name}-seed-{}", now_millis()));
+        fs::create_dir_all(&seed).expect("seed dir");
+        run_git_test(&seed, &["init"]);
+        run_git_test(&seed, &["config", "user.name", "OpenGit Test"]);
+        run_git_test(&seed, &["config", "user.email", "opengit@example.com"]);
+        run_git_test(&seed, &["checkout", "-b", "main"]);
+        commit_test_file(&seed, "file.txt", "one\n", "first commit");
+        run_git_test(&seed, &["checkout", "-b", "feature/foo"]);
+        commit_test_file(&seed, "feature.txt", "feature\n", "feature commit");
+        run_git_test(&seed, &["remote", "add", "origin", &origin.to_string_lossy()]);
+        run_git_test(&seed, &["push", "origin", "main", "feature/foo"]);
+
+        let clone = std::env::temp_dir().join(format!("opengit-{name}-clone-{}", now_millis()));
+        run_git_test(
+            Path::new("."),
+            &[
+                "clone",
+                &origin.to_string_lossy(),
+                &clone.to_string_lossy(),
+            ],
+        );
+        run_git_test(&clone, &["config", "user.name", "OpenGit Test"]);
+        run_git_test(&clone, &["config", "user.email", "opengit@example.com"]);
+        let _ = fs::remove_dir_all(&seed);
+        (origin, clone)
+    }
+
+    #[tokio::test]
+    async fn checks_out_remote_branch_as_local_tracking() {
+        let (origin, clone) = init_clone_with_remote("remote-checkout-new");
+        // Only `main` is checked out locally; `feature/foo` exists only on the remote.
+        assert!(!git_ref_exists(&clone, "refs/heads/feature/foo").await);
+
+        let snapshot = git_branch_checkout_remote(
+            clone.to_string_lossy().to_string(),
+            "origin/feature/foo".to_string(),
+        )
+        .await
+        .expect("remote checkout should succeed");
+
+        assert_eq!(snapshot.current_branch.as_deref(), Some("feature/foo"));
+        assert!(git_ref_exists(&clone, "refs/heads/feature/foo").await);
+        let upstream = run_git_test(&clone, &["rev-parse", "--abbrev-ref", "feature/foo@{upstream}"]);
+        assert_eq!(upstream.trim(), "origin/feature/foo");
+
+        let _ = fs::remove_dir_all(clone);
+        let _ = fs::remove_dir_all(origin);
+    }
+
+    #[tokio::test]
+    async fn fast_forwards_stale_local_branch_to_remote() {
+        let (origin, clone) = init_clone_with_remote("remote-checkout-ff");
+        // Create a local tracking branch, then advance the remote past it.
+        run_git_test(&clone, &["switch", "--create", "feature/foo", "--track", "origin/feature/foo"]);
+        let stale = run_git_test(&clone, &["rev-parse", "HEAD"]).trim().to_string();
+        run_git_test(&clone, &["checkout", "main"]);
+
+        // Push a new commit to the remote feature branch from a second clone.
+        let worker = std::env::temp_dir().join(format!("opengit-ff-worker-{}", now_millis()));
+        run_git_test(Path::new("."), &["clone", &origin.to_string_lossy(), &worker.to_string_lossy()]);
+        run_git_test(&worker, &["config", "user.name", "OpenGit Test"]);
+        run_git_test(&worker, &["config", "user.email", "opengit@example.com"]);
+        run_git_test(&worker, &["checkout", "feature/foo"]);
+        commit_test_file(&worker, "feature.txt", "feature\nupdated\n", "advance feature");
+        run_git_test(&worker, &["push", "origin", "feature/foo"]);
+        run_git_test(&clone, &["fetch", "origin"]);
+
+        let snapshot = git_branch_checkout_remote(
+            clone.to_string_lossy().to_string(),
+            "origin/feature/foo".to_string(),
+        )
+        .await
+        .expect("remote checkout should succeed");
+
+        assert_eq!(snapshot.current_branch.as_deref(), Some("feature/foo"));
+        let head = run_git_test(&clone, &["rev-parse", "HEAD"]).trim().to_string();
+        let remote_tip = run_git_test(&clone, &["rev-parse", "refs/remotes/origin/feature/foo"])
+            .trim()
+            .to_string();
+        assert_eq!(head, remote_tip, "local branch should be fast-forwarded to remote tip");
+        assert_ne!(head, stale, "local branch should have advanced");
+
+        let _ = fs::remove_dir_all(worker);
+        let _ = fs::remove_dir_all(clone);
+        let _ = fs::remove_dir_all(origin);
+    }
+
+    #[tokio::test]
+    async fn diverged_local_branch_is_checked_out_but_not_moved() {
+        let (origin, clone) = init_clone_with_remote("remote-checkout-diverged");
+        run_git_test(&clone, &["switch", "--create", "feature/foo", "--track", "origin/feature/foo"]);
+        // Give the local branch a commit the remote does not have.
+        let local_tip = commit_test_file(&clone, "local.txt", "local only\n", "local divergent work");
+        run_git_test(&clone, &["checkout", "main"]);
+
+        let snapshot = git_branch_checkout_remote(
+            clone.to_string_lossy().to_string(),
+            "origin/feature/foo".to_string(),
+        )
+        .await
+        .expect("remote checkout should succeed");
+
+        assert_eq!(snapshot.current_branch.as_deref(), Some("feature/foo"));
+        let head = run_git_test(&clone, &["rev-parse", "HEAD"]).trim().to_string();
+        assert_eq!(head, local_tip, "diverged local branch must not be force-updated");
+
+        let _ = fs::remove_dir_all(clone);
+        let _ = fs::remove_dir_all(origin);
+    }
+
+    #[test]
+    fn extracts_lock_path_from_git_error() {
+        let detail = "fatal: Unable to create '/Users/dev/repo/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository.\n";
+        assert_eq!(
+            locked_path_from_detail(detail).as_deref(),
+            Some("/Users/dev/repo/.git/index.lock")
+        );
+    }
+
+    #[test]
+    fn ignores_unrelated_git_errors_for_lock_detection() {
+        let detail = "fatal: not a git repository\n";
+        assert!(locked_path_from_detail(detail).is_none());
+    }
+
+    #[test]
+    fn lock_failure_becomes_actionable_error() {
+        let detail = "fatal: Unable to create '/repo/.git/index.lock': File exists.\n".to_string();
+        match git_command_failure(detail) {
+            AppError::GitActionRequired { code, message, .. } => {
+                assert_eq!(code, "GIT_LOCK_EXISTS");
+                assert!(message.contains("index.lock"));
+            }
+            other => panic!("expected GitActionRequired, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn clears_stale_index_lock() {
+        let repo = init_test_repo("clear-lock");
+        commit_test_file(&repo, "file.txt", "one\n", "first commit");
+        let lock = repo.join(".git").join("index.lock");
+        fs::write(&lock, b"").expect("write lock");
+        assert!(lock.exists());
+
+        git_clear_lock(
+            repo.to_string_lossy().to_string(),
+            lock.to_string_lossy().to_string(),
+        )
+        .await
+        .expect("lock should clear");
+
+        assert!(!lock.exists());
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn refuses_to_clear_non_lock_file() {
+        let repo = init_test_repo("clear-lock-guard");
+        commit_test_file(&repo, "file.txt", "one\n", "first commit");
+        let target = repo.join(".git").join("HEAD");
+        assert!(target.exists());
+
+        let result = git_clear_lock(
+            repo.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(target.exists(), "guard must not delete a non-lock file");
+        let _ = fs::remove_dir_all(repo);
     }
 
     fn init_test_repo(name: &str) -> PathBuf {

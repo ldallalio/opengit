@@ -81,6 +81,7 @@ import {
   chooseCloneRootFolder,
   chooseRepositoryFolder,
   checkoutBranch,
+  checkoutRemoteBranch,
   cloneRepo,
   continueGitOperation,
   commit,
@@ -126,6 +127,7 @@ import {
   pushRepo,
   rebaseOnto,
   refreshRepo,
+  clearRepoLock,
   renameBranch,
   removeBranchFromStack,
   reorderStack,
@@ -229,6 +231,12 @@ type PushRecoveryState = {
   message: string;
   remote?: string;
   branch?: string;
+};
+type LockRecoveryState = {
+  message: string;
+  repoPath: string;
+  lockPath: string;
+  retry: () => Promise<boolean>;
 };
 type FileMenuState = {
   x: number;
@@ -672,6 +680,7 @@ export default function App() {
   const [promptRequest, setPromptRequest] = useState<PromptRequest | null>(null);
   const promptResolverRef = useRef<((value: string | null) => void) | null>(null);
   const [pushRecovery, setPushRecovery] = useState<PushRecoveryState | null>(null);
+  const [lockRecovery, setLockRecovery] = useState<LockRecoveryState | null>(null);
   const [recentRepos, setRecentRepos] = useState<string[]>(loadRecentRepos);
   const [repoTabs, setRepoTabs] = useState<string[]>(loadRepoTabs);
   const [layout, setLayout] = useState<LayoutState>(defaultLayout);
@@ -1227,6 +1236,7 @@ export default function App() {
     setLoading(true);
     setError(null);
     setPushRecovery(null);
+    setLockRecovery(null);
     try {
       const next = await operation();
       setSnapshotState(next);
@@ -1238,6 +1248,23 @@ export default function App() {
     } catch (operationError) {
       const message = operationError instanceof Error ? operationError.message : String(operationError);
       const apiError = operationError instanceof OpenGitApiError ? operationError : null;
+      if (apiError?.code === "GIT_LOCK_EXISTS") {
+        const lockPath = parseLockPath(apiError.detail);
+        const lockRepoPath = snapshot?.repository.path ?? repoPath;
+        if (lockPath && lockRepoPath) {
+          setLockRecovery({
+            message,
+            repoPath: lockRepoPath,
+            lockPath,
+            retry: () => runSnapshotOperation(label, operation)
+          });
+          setOperationLog((log) => [`${label} blocked: Git lock present`, ...log].slice(0, 8));
+        } else {
+          setError(message);
+          setOperationLog((log) => [`${label} failed: ${message}`, ...log].slice(0, 8));
+        }
+        return false;
+      }
       if (apiError?.code === "PUSH_NON_FAST_FORWARD") {
         setPushRecovery(buildPushRecoveryState(message, apiError.detail, snapshot));
         setOperationLog((log) => [`${label} rejected: ${message}`, ...log].slice(0, 8));
@@ -1552,7 +1579,7 @@ export default function App() {
 
   const checkoutInspectedBranch = (inspection: BranchInspection) => {
     if (inspection.kind === "remote") {
-      setError("Create or checkout a local branch before checking out a remote tracking ref.");
+      runBranchTargetOperation("Checkout remote branch", (repo) => checkoutRemoteBranch(repo, inspection.branch.name));
       return;
     }
     const message = inspection.kind === "tag" ? `Checkout tag '${inspection.branch.name}'? This will detach HEAD.` : undefined;
@@ -1705,6 +1732,10 @@ export default function App() {
     }
 
     if (action === "checkout") {
+      if (target.isRemote) {
+        runBranchTargetOperation("Checkout remote branch", (repo) => checkoutRemoteBranch(repo, target.name));
+        return;
+      }
       const message = target.isTag ? `Checkout tag '${target.name}'? This will detach HEAD.` : undefined;
       runBranchTargetOperation("Checkout branch", (repo) => checkoutBranch(repo, target.name), message);
       return;
@@ -2338,16 +2369,14 @@ export default function App() {
       return;
     }
 
-    if (branch.isRemote) {
-      setError("Create a local branch from the remote branch before checking it out.");
-      setBranchSwitcherOpen(false);
-      return;
-    }
-
     const repo = requireRepo();
     if (!repo) return;
     setBranchSwitcherOpen(false);
     setBranchSearch("");
+    if (branch.isRemote) {
+      void runSnapshotOperation("Checkout remote branch", () => checkoutRemoteBranch(repo, branch.name));
+      return;
+    }
     void runSnapshotOperation("Checkout branch", () => checkoutBranch(repo, branch.name));
   };
 
@@ -2412,6 +2441,27 @@ export default function App() {
     void runSnapshotOperation("Force push", () =>
       pushRepo(snapshot.repository.path, pushRecovery.remote, branch, true, false)
     );
+  };
+
+  const clearLockAndRetry = async () => {
+    if (!lockRecovery) return;
+    const recovery = lockRecovery;
+    setLockRecovery(null);
+    setLoading(true);
+    setError(null);
+    try {
+      const cleared = await clearRepoLock(recovery.repoPath, recovery.lockPath);
+      setSnapshotState(cleared);
+      setOperationLog((log) => ["Cleared Git lock", ...log].slice(0, 8));
+    } catch (clearError) {
+      const message = clearError instanceof Error ? clearError.message : String(clearError);
+      setError(message);
+      setOperationLog((log) => [`Clear lock failed: ${message}`, ...log].slice(0, 8));
+      setLoading(false);
+      return;
+    }
+    setLoading(false);
+    await recovery.retry();
   };
 
   const resolveSelectedConflict = (strategy: ConflictStrategy) => {
@@ -2606,6 +2656,21 @@ export default function App() {
                 Force Push
               </button>
               <button className="banner-action cancel" onClick={() => setPushRecovery(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {lockRecovery && (
+          <div className="push-recovery-banner" role="alert">
+            <AlertTriangle size={16} />
+            <span>{lockRecovery.message}</span>
+            <div className="push-recovery-actions">
+              <button className="banner-action pull" onClick={() => void clearLockAndRetry()} disabled={loading}>
+                Clear lock &amp; retry
+              </button>
+              <button className="banner-action cancel" onClick={() => setLockRecovery(null)}>
                 Cancel
               </button>
             </div>
@@ -3506,7 +3571,7 @@ function BranchSwitcher({
             type="button"
             role="menuitem"
             className={clsx(branch.isCurrent && "active")}
-            disabled={branch.isUnborn || branch.isRemote}
+            disabled={branch.isUnborn}
             onClick={() => onSelect(branch)}
           >
             <GitBranch size={14} />
@@ -4142,7 +4207,7 @@ function BranchInspector({
   const defaultCounts = inspection.aheadBehindDefault;
   const compareCounts = upstreamCounts ?? defaultCounts;
   const compareLabel = upstreamCounts ? inspection.upstream : inspection.defaultBranch;
-  const canCheckout = !inspection.branch.isCurrent && inspection.kind !== "remote";
+  const canCheckout = !inspection.branch.isCurrent;
   const canPull = inspection.branch.isCurrent && inspection.kind !== "tag";
   const canPush = inspection.kind === "local" || inspection.kind === "unknown";
 
@@ -6783,6 +6848,11 @@ function stackItemForCommit(commit: Commit, stack: BranchStack) {
   return stack.items.find((item) => refs.includes(item.branch) || refs.includes(`origin/${item.branch}`)) ?? null;
 }
 
+function parseLockPath(detail: string | undefined): string | null {
+  if (!detail) return null;
+  return detail.match(/Unable to create '([^']+\.lock)'/)?.[1] ?? null;
+}
+
 function buildPushRecoveryState(message: string, detail: string | undefined, snapshot: RepoSnapshot | null): PushRecoveryState {
   const rejectedBranch = detail?.match(/\[rejected\]\s+(\S+)\s+->\s+(\S+)/)?.[1];
   const currentBranch = snapshot?.currentBranch && !["HEAD", "(detached)"].includes(snapshot.currentBranch)
@@ -6837,7 +6907,7 @@ function branchMenuItems(target: BranchMenuTarget, snapshot: RepoSnapshot | null
   const hasRemote = (snapshot?.remotes.length ?? 0) > 0;
   const localBranch = !target.isRemote && !target.isTag && !target.isUnborn && !target.isCommitOnly;
   const branchRef = target.isCommitOnly ? "commit" : target.isTag ? "tag" : target.isRemote ? "remote branch" : "branch";
-  const canCheckout = target.isTag || (localBranch && !target.isCurrent);
+  const canCheckout = target.isTag || target.isRemote || (localBranch && !target.isCurrent);
   const canMerge = !target.isCurrent && !target.isTag && !target.isUnborn && !target.isCommitOnly;
   const canRebase = !target.isCurrent && !target.isTag && !target.isUnborn && !target.isCommitOnly;
   const canDelete = localBranch && !target.isCurrent && !target.isProtected;
@@ -6883,9 +6953,9 @@ function branchMenuItems(target: BranchMenuTarget, snapshot: RepoSnapshot | null
     {
       type: "item",
       action: "checkout",
-      label: target.isTag ? "Checkout tag" : "Checkout",
+      label: target.isTag ? "Checkout tag" : target.isRemote ? "Checkout (create local & track)" : "Checkout",
       disabled: !canCheckout,
-      hint: target.isCommitOnly ? "not a branch" : target.isRemote ? "create local branch here" : target.isCurrent ? "already checked out" : undefined
+      hint: target.isCommitOnly ? "not a branch" : target.isCurrent ? "already checked out" : undefined
     },
     { type: "item", action: "create-worktree", label: `Create worktree from ${target.name}`, disabled: true, hint: "post-MVP" },
     { type: "separator", key: "stack" },

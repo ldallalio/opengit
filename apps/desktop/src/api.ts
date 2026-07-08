@@ -123,6 +123,9 @@ export async function chooseCloneRootFolder(): Promise<string | null> {
 export const refreshRepo = (repoPath: string, historyLimit?: number) =>
   call<RepoSnapshot>("repo_status", { repoPath, historyLimit }, demoSnapshot);
 
+export const clearRepoLock = (repoPath: string, lockPath: string) =>
+  call<RepoSnapshot>("git_clear_lock", { repoPath, lockPath }, demoSnapshot);
+
 export type GitIdentity = {
   name: string | null;
   email: string | null;
@@ -243,6 +246,9 @@ export const createBranch = (repoPath: string, name: string, checkout: boolean, 
 
 export const checkoutBranch = (repoPath: string, name: string) =>
   call<RepoSnapshot>("git_branch_checkout", { repoPath, name }, demoSnapshot);
+
+export const checkoutRemoteBranch = (repoPath: string, remoteRef: string) =>
+  call<RepoSnapshot>("git_branch_checkout_remote", { repoPath, remoteRef }, demoSnapshot);
 
 export const deleteBranch = (repoPath: string, name: string, force: boolean) =>
   call<RepoSnapshot>("git_branch_delete", { repoPath, name, force }, demoSnapshot);
