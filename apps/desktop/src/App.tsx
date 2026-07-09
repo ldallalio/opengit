@@ -113,6 +113,7 @@ import {
   generateAiCommitMessage,
   generateAiPrDescription,
   getDiff,
+  listDirectoryFiles,
   listProviderRepositories,
   inspectBranch,
   isTauriRuntime,
@@ -765,7 +766,10 @@ export default function App() {
     () => filterChangesByLane(stagedChanges, parallelMode ? selectedLaneId : undefined, laneByPath),
     [stagedChanges, parallelMode, selectedLaneId, laneByPath]
   );
-  const inspectorFileTitle = worktreeSelected ? `Working Changes (${snapshot?.changes.length ?? 0})` : `Changed Files (${commitFiles.length})`;
+  const workingChangesCount = snapshot?.changesTruncated
+    ? `${snapshot.changes.length.toLocaleString()} of ${(snapshot.totalChanges ?? snapshot.changes.length).toLocaleString()}`
+    : `${snapshot?.changes.length ?? 0}`;
+  const inspectorFileTitle = worktreeSelected ? `Working Changes (${workingChangesCount})` : `Changed Files (${commitFiles.length})`;
   const visibleRepoTabs = useMemo(() => uniqueRepoPaths([activeRepoPath, ...repoTabs]).slice(0, repoTabLimit), [activeRepoPath, repoTabs]);
   const providerLocalPaths = useMemo(
     () => uniqueRepoPaths([activeRepoPath, ...repoTabs, ...recentRepos, ...Object.values(providerLocatedPaths)]),
@@ -1041,8 +1045,15 @@ export default function App() {
       return;
     }
 
+    // Untracked directories (e.g. `docs/`) have no file diff — expand them instead.
+    if (selectedFile.path.endsWith("/")) {
+      setDiff("");
+      return;
+    }
+
+    const isUntracked = selectedFile.status === "untracked";
     let cancelled = false;
-    void getDiff(currentRepoPath, selectedFile.path, selectedFile.staged)
+    void getDiff(currentRepoPath, selectedFile.path, selectedFile.staged, isUntracked)
       .then((value) => {
         if (!cancelled) setDiff(value);
       })
@@ -1469,6 +1480,12 @@ export default function App() {
     setSelectedFile(change);
     setDiffMode("working");
     setCenterView("diff");
+  };
+
+  const loadFolderChildren = (dir: string): Promise<FileChange[]> => {
+    const repo = snapshot?.repository.path;
+    if (!repo) return Promise.resolve([]);
+    return listDirectoryFiles(repo, dir);
   };
 
   const openBranchMenu = (target: BranchMenuTarget, event: ReactMouseEvent<HTMLElement>) => {
@@ -2677,6 +2694,17 @@ export default function App() {
           </div>
         )}
 
+        {snapshot?.changesTruncated && (
+          <div className="error-banner" role="alert">
+            <AlertTriangle size={16} />
+            <span>
+              This repository has {snapshot.totalChanges?.toLocaleString() ?? "many"} working-tree changes — showing the
+              first {snapshot.changes.length.toLocaleString()} to stay responsive. This usually means build output or a
+              vendored folder is not in <code>.gitignore</code>.
+            </span>
+          </div>
+        )}
+
         {activeConflictState && snapshot && (
           <div className="conflict-recovery-banner" role="alert">
             <AlertTriangle size={16} />
@@ -3020,6 +3048,7 @@ export default function App() {
                   changes={snapshot?.changes ?? []}
                   selected={selectedFile}
                   onSelect={openWorkingDiff}
+                  loadFolderChildren={loadFolderChildren}
                 />
               ) : (
                 <CommitFileList
@@ -3119,6 +3148,7 @@ export default function App() {
                       assignLane={parallelMode ? assignChangeToLane : undefined}
                       createLaneFromChange={parallelMode ? (change) => createLaneFromChanges([change]) : undefined}
                       onFileMenu={(change, event) => openFileMenu(change, false, event)}
+                      loadFolderChildren={loadFolderChildren}
                     />
                     <ChangeColumn
                       title={`Staged (${laneFilteredStagedChanges.length})`}
@@ -3139,6 +3169,7 @@ export default function App() {
                       assignLane={parallelMode ? assignChangeToLane : undefined}
                       createLaneFromChange={parallelMode ? (change) => createLaneFromChanges([change]) : undefined}
                       onFileMenu={(change, event) => openFileMenu(change, true, event)}
+                      loadFolderChildren={loadFolderChildren}
                     />
                   </div>
                 </div>
@@ -4964,15 +4995,45 @@ function CommitDetail({
   );
 }
 
+const isUntrackedFolder = (change: FileChange) => change.status === "untracked" && change.path.endsWith("/");
+
+type FolderChildState = FileChange[] | "loading" | "error";
+
+function useFolderChildren(loadFolderChildren?: (dir: string) => Promise<FileChange[]>) {
+  const [expanded, setExpanded] = useState<Record<string, FolderChildState>>({});
+
+  const toggle = async (dir: string) => {
+    if (expanded[dir]) {
+      setExpanded((current) => {
+        const { [dir]: _removed, ...rest } = current;
+        return rest;
+      });
+      return;
+    }
+    setExpanded((current) => ({ ...current, [dir]: "loading" }));
+    try {
+      const files = loadFolderChildren ? await loadFolderChildren(dir) : [];
+      setExpanded((current) => ({ ...current, [dir]: files }));
+    } catch {
+      setExpanded((current) => ({ ...current, [dir]: "error" }));
+    }
+  };
+
+  return { expanded, toggle };
+}
+
 function WorktreeChangeList({
   changes,
   selected,
-  onSelect
+  onSelect,
+  loadFolderChildren
 }: {
   changes: FileChange[];
   selected: FileChange | null;
   onSelect: (change: FileChange) => void;
+  loadFolderChildren?: (dir: string) => Promise<FileChange[]>;
 }) {
+  const { expanded, toggle } = useFolderChildren(loadFolderChildren);
   if (changes.length === 0) {
     return (
       <EmptyState>
@@ -4982,22 +5043,45 @@ function WorktreeChangeList({
     );
   }
 
+  const renderRow = (change: FileChange, child = false) => (
+    <button
+      key={`${change.status}-${change.oldPath ?? ""}-${change.path}-${change.staged}-${change.unstaged}`}
+      className={clsx("file-row", "commit-file-row", "worktree-change-row", child && "file-row-child", selected?.path === change.path && "selected")}
+      onClick={() => onSelect(change)}
+      aria-pressed={selected?.path === change.path}
+    >
+      <span className={clsx("status-chip", change.status)}>{statusLabel(change)}</span>
+      <span>{change.oldPath ? `${change.oldPath} -> ${change.path}` : change.path}</span>
+      <small className={clsx("worktree-file-state", change.staged && "staged", change.unstaged && "unstaged")}>
+        {change.staged && change.unstaged ? "staged + unstaged" : change.staged ? "staged" : "unstaged"}
+      </small>
+    </button>
+  );
+
   return (
     <div className="file-list commit-file-list">
-      {changes.map((change) => (
-        <button
-          key={`${change.status}-${change.oldPath ?? ""}-${change.path}-${change.staged}-${change.unstaged}`}
-          className={clsx("file-row", "commit-file-row", "worktree-change-row", selected?.path === change.path && "selected")}
-          onClick={() => onSelect(change)}
-          aria-pressed={selected?.path === change.path}
-        >
-          <span className={clsx("status-chip", change.status)}>{statusLabel(change)}</span>
-          <span>{change.oldPath ? `${change.oldPath} -> ${change.path}` : change.path}</span>
-          <small className={clsx("worktree-file-state", change.staged && "staged", change.unstaged && "unstaged")}>
-            {change.staged && change.unstaged ? "staged + unstaged" : change.staged ? "staged" : "unstaged"}
-          </small>
-        </button>
-      ))}
+      {changes.map((change) => {
+        if (!isUntrackedFolder(change)) return renderRow(change);
+        const state = expanded[change.path];
+        const open = Boolean(state);
+        return (
+          <div key={`folder-${change.path}`} className="file-folder-group">
+            <button
+              className={clsx("file-row", "commit-file-row", "worktree-change-row", "file-folder-row")}
+              onClick={() => void toggle(change.path)}
+              aria-expanded={open}
+            >
+              <span className="folder-caret">{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</span>
+              <span className={clsx("status-chip", change.status)}>{statusLabel(change)}</span>
+              <span>{change.path}</span>
+            </button>
+            {state === "loading" && <div className="file-folder-note">Loading…</div>}
+            {state === "error" && <div className="file-folder-note">Could not list folder</div>}
+            {Array.isArray(state) && state.length === 0 && <div className="file-folder-note">Empty folder</div>}
+            {Array.isArray(state) && state.map((child) => renderRow(child, true))}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -5141,7 +5225,8 @@ function ChangeColumn({
   laneForChange,
   assignLane,
   createLaneFromChange,
-  onFileMenu
+  onFileMenu,
+  loadFolderChildren
 }: {
   title: string;
   changes: FileChange[];
@@ -5157,8 +5242,87 @@ function ChangeColumn({
   assignLane?: (change: FileChange) => void;
   createLaneFromChange?: (change: FileChange) => void;
   onFileMenu?: (change: FileChange, event: ReactMouseEvent<HTMLElement>) => void;
+  loadFolderChildren?: (dir: string) => Promise<FileChange[]>;
 }) {
   const emptyLabel = title.toLowerCase().startsWith("staged") ? "No staged changes" : "No unstaged changes";
+  const { expanded, toggle } = useFolderChildren(loadFolderChildren);
+
+  const renderChangeRow = (change: FileChange, child = false) => {
+    const lane = laneForChange?.(change);
+    return (
+      <div
+        key={`${change.path}-${change.indexStatus}-${change.worktreeStatus}`}
+        className={clsx("file-row", child && "file-row-child", lane && "lane-owned", selected?.path === change.path && "selected")}
+        role="button"
+        tabIndex={0}
+        onClick={() => onSelect(change)}
+        onContextMenu={(event) => onFileMenu?.(change, event)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect(change);
+          }
+        }}
+      >
+        <span className={clsx("status-chip", change.status)}>{statusLabel(change)}</span>
+        <span>
+          {change.path}
+          {lane && <em className="lane-owner-chip">{lane.name}</em>}
+        </span>
+        <span className="file-actions">
+          {assignLane && (
+            <IconButton
+              label={lane ? "Move to lane" : "Assign to lane"}
+              onClick={(event) => {
+                event.stopPropagation();
+                assignLane(change);
+              }}
+            >
+              <GitFork size={13} />
+            </IconButton>
+          )}
+          {createLaneFromChange && !lane && (
+            <IconButton
+              label="Create lane from file"
+              onClick={(event) => {
+                event.stopPropagation();
+                createLaneFromChange(change);
+              }}
+            >
+              <Plus size={13} />
+            </IconButton>
+          )}
+          <IconButton
+            label={primaryLabel}
+            onClick={(event) => {
+              event.stopPropagation();
+              primaryAction(change);
+            }}
+          >
+            <Check size={13} />
+          </IconButton>
+          <IconButton
+            label="View diff"
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelect(change);
+            }}
+          >
+            <Eye size={13} />
+          </IconButton>
+          <IconButton
+            label="Discard"
+            onClick={(event) => {
+              event.stopPropagation();
+              secondaryAction(change);
+            }}
+          >
+            <Trash2 size={13} />
+          </IconButton>
+        </span>
+      </div>
+    );
+  };
 
   return (
     <div className="change-column">
@@ -5170,80 +5334,57 @@ function ChangeColumn({
       </div>
       <div className="file-list">
         {changes.map((change) => {
-          const lane = laneForChange?.(change);
-          return (
-            <div
-              key={`${change.path}-${change.indexStatus}-${change.worktreeStatus}`}
-              className={clsx("file-row", lane && "lane-owned", selected?.path === change.path && "selected")}
-              role="button"
-              tabIndex={0}
-              onClick={() => onSelect(change)}
-              onContextMenu={(event) => onFileMenu?.(change, event)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  onSelect(change);
-                }
-              }}
-            >
-              <span className={clsx("status-chip", change.status)}>{statusLabel(change)}</span>
-              <span>
-                {change.path}
-                {lane && <em className="lane-owner-chip">{lane.name}</em>}
-              </span>
-              <span className="file-actions">
-                {assignLane && (
-                  <IconButton
-                    label={lane ? "Move to lane" : "Assign to lane"}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      assignLane(change);
-                    }}
-                  >
-                    <GitFork size={13} />
-                  </IconButton>
-                )}
-                {createLaneFromChange && !lane && (
-                  <IconButton
-                    label="Create lane from file"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      createLaneFromChange(change);
-                    }}
-                  >
-                    <Plus size={13} />
-                  </IconButton>
-                )}
-                <IconButton
-                  label={primaryLabel}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    primaryAction(change);
+          if (isUntrackedFolder(change)) {
+            const state = expanded[change.path];
+            const open = Boolean(state);
+            return (
+              <div key={`folder-${change.path}`} className="file-folder-group">
+                <div
+                  className={clsx("file-row", "file-folder-row")}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => void toggle(change.path)}
+                  onContextMenu={(event) => onFileMenu?.(change, event)}
+                  aria-expanded={open}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      void toggle(change.path);
+                    }
                   }}
                 >
-                  <Check size={13} />
-                </IconButton>
-                <IconButton
-                  label="View diff"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onSelect(change);
-                  }}
-                >
-                  <Eye size={13} />
-                </IconButton>
-                <IconButton
-                  label="Discard"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    secondaryAction(change);
-                  }}
-                >
-                  <Trash2 size={13} />
-                </IconButton>
-              </span>
-            </div>
-          );
+                  <span className="folder-caret">{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</span>
+                  <span className={clsx("status-chip", change.status)}>{statusLabel(change)}</span>
+                  <span>{change.path}</span>
+                  <span className="file-actions">
+                    <IconButton
+                      label={primaryLabel}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        primaryAction(change);
+                      }}
+                    >
+                      <Check size={13} />
+                    </IconButton>
+                    <IconButton
+                      label="Discard"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        secondaryAction(change);
+                      }}
+                    >
+                      <Trash2 size={13} />
+                    </IconButton>
+                  </span>
+                </div>
+                {state === "loading" && <div className="file-folder-note">Loading…</div>}
+                {state === "error" && <div className="file-folder-note">Could not list folder</div>}
+                {Array.isArray(state) && state.length === 0 && <div className="file-folder-note">Empty folder</div>}
+                {Array.isArray(state) && state.map((child) => renderChangeRow(child, true))}
+              </div>
+            );
+          }
+          return renderChangeRow(change);
         })}
         {changes.length === 0 && (
           <EmptyState>
@@ -5713,6 +5854,7 @@ function ConflictPane({ title, text, diff, large = false }: { title: string; tex
 
 function SplitDiffViewer({ path, diff, loading = false }: { path: string; diff: string; loading?: boolean }) {
   const rows = useMemo(() => parseSplitDiff(diff), [diff]);
+  const fileKind = useMemo(() => diffFileKind(diff), [diff]);
 
   return (
     <div className="diff-shell">
@@ -5723,7 +5865,7 @@ function SplitDiffViewer({ path, diff, loading = false }: { path: string; diff: 
           <span>Loading diff</span>
         </EmptyState>
       ) : rows.length > 0 ? (
-        <VisualDiff rows={rows} />
+        <VisualDiff rows={rows} mode={fileKind} />
       ) : (
         <EmptyState>
           <FileText size={24} />
@@ -5734,7 +5876,36 @@ function SplitDiffViewer({ path, diff, loading = false }: { path: string; diff: 
   );
 }
 
-function VisualDiff({ rows }: { rows: SplitDiffRow[] }) {
+function VisualDiff({ rows, mode = "modified" }: { rows: SplitDiffRow[]; mode?: DiffFileKind }) {
+  // A brand-new file has no "before" and a deleted file has no "after", so a
+  // two-column Old/New view just shows a wasted empty side. Collapse to one column.
+  if (mode !== "modified") {
+    const side = mode === "added" ? "right" : "left";
+    return (
+      <div className="visual-diff-view">
+        <div className="visual-diff-grid single">
+          <div className="diff-side-header">{mode === "added" ? "New file" : "Deleted file"}</div>
+          {rows.map((row, index) =>
+            row.kind === "hunk" ? (
+              <div key={`${row.header}-${index}`} className="diff-hunk-row">
+                {row.header}
+              </div>
+            ) : (
+              <div key={`${row.leftNumber ?? "-"}-${row.rightNumber ?? "-"}-${index}`} className="diff-row">
+                <div className={clsx("diff-line-number", lineClass(row.kind, side))}>
+                  {(side === "right" ? row.rightNumber : row.leftNumber) ?? ""}
+                </div>
+                <div className={clsx("diff-code", lineClass(row.kind, side))}>
+                  {(side === "right" ? row.rightText : row.leftText) ?? ""}
+                </div>
+              </div>
+            )
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="visual-diff-view">
       <div className="visual-diff-grid">
@@ -5761,6 +5932,15 @@ function VisualDiff({ rows }: { rows: SplitDiffRow[] }) {
       </div>
     </div>
   );
+}
+
+type DiffFileKind = "added" | "deleted" | "modified";
+
+/** Classify a unified diff so a pure add/delete can render as a single column. */
+function diffFileKind(raw: string): DiffFileKind {
+  if (/^new file mode/m.test(raw) || /^--- \/dev\/null/m.test(raw)) return "added";
+  if (/^deleted file mode/m.test(raw) || /^\+\+\+ \/dev\/null/m.test(raw)) return "deleted";
+  return "modified";
 }
 
 function parseSplitDiff(raw: string): SplitDiffRow[] {

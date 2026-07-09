@@ -21,6 +21,11 @@ const OPENAI_KEY_ACCOUNT: &str = "openai-api-key";
 const AZURE_DEVOPS_PAT_ACCOUNT: &str = "azure-devops-pat";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5-mini";
 const MAX_STAGED_DIFF_CHARS: usize = 48_000;
+/// Upper bound on the number of working-tree change entries returned in a snapshot.
+/// A repository with tens of thousands of changes (e.g. a build-output directory that
+/// slipped past .gitignore) would otherwise ship a multi-megabyte payload and freeze
+/// the UI. Beyond this the list is capped and `changes_truncated` is set.
+const MAX_CHANGE_ENTRIES: usize = 5_000;
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -481,6 +486,10 @@ struct RepoSnapshot {
     ahead: i32,
     behind: i32,
     changes: Vec<FileChange>,
+    /// Total number of working-tree changes before any display cap was applied.
+    total_changes: usize,
+    /// True when `changes` was capped at `MAX_CHANGE_ENTRIES` to keep the UI responsive.
+    changes_truncated: bool,
     branches: Vec<Branch>,
     remotes: Vec<Remote>,
     stashes: Vec<Stash>,
@@ -2789,9 +2798,31 @@ async fn git_stash_drop(repo_path: String, stash: String) -> CommandResult<RepoS
 }
 
 #[tauri::command]
-async fn git_diff(repo_path: String, path: String, staged: bool) -> CommandResult<String> {
+async fn git_diff(
+    repo_path: String,
+    path: String,
+    staged: bool,
+    untracked: bool,
+) -> CommandResult<String> {
     let repo = resolve_repo_root(&repo_path).await?;
     let mut safe_paths = validate_file_paths(&[path])?;
+
+    if untracked {
+        // Untracked files are absent from the index and HEAD, so a plain `git diff`
+        // shows nothing. Diff against /dev/null with --no-index to render the whole
+        // file as additions. --no-index exits 1 when the inputs differ (always true
+        // for a new file), so that exit code is expected rather than an error.
+        let mut args = vec![
+            "diff".into(),
+            "--no-ext-diff".into(),
+            "--minimal".into(),
+            "--no-index".into(),
+            "/dev/null".into(),
+        ];
+        args.append(&mut safe_paths);
+        return run_git_no_index_diff(&repo, args).await;
+    }
+
     let mut args = vec!["diff".into(), "--no-ext-diff".into(), "--minimal".into()];
     if staged {
         args.push("--staged".into());
@@ -2799,6 +2830,57 @@ async fn git_diff(repo_path: String, path: String, staged: bool) -> CommandResul
     args.push("--".into());
     args.append(&mut safe_paths);
     run_git(Some(&repo), args).await
+}
+
+/// Run `git diff --no-index`, which uses a non-standard exit-code convention:
+/// 0 = inputs identical, 1 = inputs differ (the normal case here), >1 = real error.
+async fn run_git_no_index_diff(repo: &Path, args: Vec<String>) -> CommandResult<String> {
+    let mut command = Command::new("git");
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.arg("-C").arg(repo);
+    command.args(args);
+
+    let output = command.output().await?;
+    match output.status.code() {
+        Some(0) | Some(1) => Ok(String::from_utf8_lossy(&output.stdout).to_string()),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            Err(git_command_failure(if stderr.trim().is_empty() {
+                stdout
+            } else {
+                stderr
+            }))
+        }
+    }
+}
+
+/// List the individual untracked files inside an untracked directory so the UI can
+/// expand a collapsed folder row (e.g. `docs/`) and show its contents. Capped like a
+/// normal snapshot so a huge untracked directory can't flood the payload.
+#[tauri::command]
+async fn git_list_directory_files(
+    repo_path: String,
+    dir: String,
+) -> CommandResult<Vec<FileChange>> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    let normalized = dir.trim_end_matches('/').to_string();
+    let mut safe_dir = validate_file_paths(&[normalized])?;
+
+    let mut args = vec![
+        "status".into(),
+        "--porcelain=v2".into(),
+        "--branch".into(),
+        "-z".into(),
+        "-uall".into(),
+        "--".into(),
+    ];
+    args.append(&mut safe_dir);
+
+    let output = run_git(Some(&repo), args).await?;
+    let (_branch, mut changes, _conflicts) = parse_status(&output);
+    changes.truncate(MAX_CHANGE_ENTRIES);
+    Ok(changes)
 }
 
 #[tauri::command]
@@ -2863,7 +2945,12 @@ async fn build_snapshot(repo: &Path, history_limit: Option<u32>) -> CommandResul
     )
     .await?;
 
-    let (branch_status, changes, conflicts) = parse_status(&status_output);
+    let (branch_status, mut changes, conflicts) = parse_status(&status_output);
+    let total_changes = changes.len();
+    let changes_truncated = total_changes > MAX_CHANGE_ENTRIES;
+    if changes_truncated {
+        changes.truncate(MAX_CHANGE_ENTRIES);
+    }
     let remotes = parse_remotes(&run_git(Some(repo), vec!["remote".into(), "-v".into()]).await?);
     let branches = parse_branches(
         &run_git(
@@ -2927,6 +3014,8 @@ async fn build_snapshot(repo: &Path, history_limit: Option<u32>) -> CommandResul
         ahead: branch_status.ahead,
         behind: branch_status.behind,
         changes,
+        total_changes,
+        changes_truncated,
         branches,
         remotes,
         stashes,
@@ -6790,6 +6879,7 @@ pub fn run() {
             git_stash_apply,
             git_stash_drop,
             git_diff,
+            git_list_directory_files,
             git_commit_files,
             git_commit_file_diff,
             git_clear_lock
@@ -7216,6 +7306,64 @@ mod tests {
         assert_eq!(stacks.len(), 1);
         assert_eq!(stacks[0].items[0].base_branch, trunk);
 
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn diffs_untracked_file_against_dev_null() {
+        let repo = init_test_repo("untracked-diff");
+        commit_test_file(&repo, "seed.txt", "seed\n", "seed commit");
+        fs::write(repo.join("new.txt"), "hello\nworld\n").expect("write new file");
+
+        let diff = git_diff(
+            repo.to_string_lossy().to_string(),
+            "new.txt".to_string(),
+            false,
+            true,
+        )
+        .await
+        .expect("untracked diff should render");
+
+        assert!(diff.contains("+hello"), "diff should show added content:\n{diff}");
+        assert!(diff.contains("+world"), "diff should show added content:\n{diff}");
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn lists_files_in_untracked_directory() {
+        let repo = init_test_repo("untracked-dir");
+        commit_test_file(&repo, "seed.txt", "seed\n", "seed commit");
+        fs::create_dir_all(repo.join("docs")).expect("mkdir docs");
+        fs::write(repo.join("docs/a.md"), "a\n").expect("write a");
+        fs::write(repo.join("docs/b.md"), "b\n").expect("write b");
+
+        let files = git_list_directory_files(
+            repo.to_string_lossy().to_string(),
+            "docs/".to_string(),
+        )
+        .await
+        .expect("directory listing should succeed");
+
+        let mut paths: Vec<String> = files.iter().map(|change| change.path.clone()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["docs/a.md".to_string(), "docs/b.md".to_string()]);
+        assert!(files.iter().all(|change| change.status == FileStatus::Untracked));
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_change_totals_without_truncation() {
+        let repo = init_test_repo("change-totals");
+        commit_test_file(&repo, "seed.txt", "seed\n", "seed commit");
+        for index in 0..12 {
+            fs::write(repo.join(format!("file-{index}.txt")), "x\n").expect("write file");
+        }
+
+        let snapshot = build_snapshot(&repo, None).await.expect("snapshot");
+
+        assert_eq!(snapshot.total_changes, 12);
+        assert_eq!(snapshot.changes.len(), 12);
+        assert!(!snapshot.changes_truncated);
         let _ = fs::remove_dir_all(repo);
     }
 

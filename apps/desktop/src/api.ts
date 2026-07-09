@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import type { BranchInspection, BranchStack, Commit, CommitFile, GitProvider, ParallelLane, ProviderAccountStatus, ProviderRepoCatalog, RepoSnapshot } from "@opengit/core";
+import type { BranchInspection, BranchStack, Commit, CommitFile, FileChange, GitProvider, ParallelLane, ProviderAccountStatus, ProviderRepoCatalog, RepoSnapshot } from "@opengit/core";
 import { demoBranchInspection, demoCommitFiles, demoDiff, demoProviderCatalog, demoSnapshot } from "./demo";
 
 export type OpenAiStatus = {
@@ -360,8 +360,11 @@ export const stashApply = (repoPath: string, stash: string) =>
 export const stashDrop = (repoPath: string, stash: string) =>
   call<RepoSnapshot>("git_stash_drop", { repoPath, stash }, demoSnapshot);
 
-export const getDiff = (repoPath: string, path: string, staged: boolean) =>
-  call<string>("git_diff", { repoPath, path, staged }, demoDiff);
+export const getDiff = (repoPath: string, path: string, staged: boolean, untracked = false) =>
+  call<string>("git_diff", { repoPath, path, staged, untracked }, demoDiff);
+
+export const listDirectoryFiles = (repoPath: string, dir: string) =>
+  call<FileChange[]>("git_list_directory_files", { repoPath, dir }, []);
 
 export const getCommitFiles = (repoPath: string, sha: string) =>
   call<CommitFile[]>("git_commit_files", { repoPath, sha }, demoCommitFiles);

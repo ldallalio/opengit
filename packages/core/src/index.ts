@@ -345,6 +345,10 @@ export interface RepoSnapshot {
   ahead: number;
   behind: number;
   changes: FileChange[];
+  /** Total working-tree changes before any display cap; may exceed `changes.length`. */
+  totalChanges?: number;
+  /** True when `changes` was capped by the backend to keep the UI responsive. */
+  changesTruncated?: boolean;
   branches: Branch[];
   remotes: Remote[];
   stashes: Stash[];

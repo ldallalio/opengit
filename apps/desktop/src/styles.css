@@ -2781,6 +2781,10 @@ body.resizing-layout-horizontal {
   line-height: 1.45;
 }
 
+.visual-diff-grid.single {
+  grid-template-columns: 58px minmax(0, 1fr);
+}
+
 .diff-side-header {
   position: sticky;
   top: 0;
@@ -3108,6 +3112,27 @@ body.resizing-layout-horizontal {
 
 .worktree-change-row {
   grid-template-columns: 28px minmax(0, 1fr) auto;
+}
+
+.file-folder-row {
+  grid-template-columns: 16px 28px minmax(0, 1fr) auto;
+}
+
+.folder-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.file-row-child {
+  padding-left: 18px;
+}
+
+.file-folder-note {
+  padding: 4px 10px 4px 34px;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .worktree-file-state {
