@@ -228,6 +228,12 @@ type BranchMenuState = {
   y: number;
   target: BranchMenuTarget;
 };
+type RefOverflowMenuState = {
+  x: number;
+  y: number;
+  refs: RefChip[];
+  commit: Commit;
+};
 type PushRecoveryState = {
   message: string;
   remote?: string;
@@ -696,6 +702,7 @@ export default function App() {
   const [historyPagingExhausted, setHistoryPagingExhausted] = useState(false);
   const [historyPageLoading, setHistoryPageLoading] = useState(false);
   const [branchMenu, setBranchMenu] = useState<BranchMenuState | null>(null);
+  const [refOverflowMenu, setRefOverflowMenu] = useState<RefOverflowMenuState | null>(null);
   const [fileMenu, setFileMenu] = useState<FileMenuState | null>(null);
   const [branchSwitcherOpen, setBranchSwitcherOpen] = useState(false);
   const [branchSearch, setBranchSearch] = useState("");
@@ -952,6 +959,24 @@ export default function App() {
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, [branchMenu]);
+
+  useEffect(() => {
+    if (!refOverflowMenu) return;
+
+    const closeMenu = () => setRefOverflowMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setRefOverflowMenu(null);
+      }
+    };
+
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [refOverflowMenu]);
 
   useEffect(() => {
     if (!fileMenu) return;
@@ -1496,6 +1521,21 @@ export default function App() {
     const menuHeight = 560;
     setBranchMenu({
       target,
+      x: clamp(event.clientX, 8, Math.max(8, window.innerWidth - menuWidth - 8)),
+      y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - menuHeight - 8))
+    });
+  };
+
+  const openRefOverflowMenu = (refs: RefChip[], commit: Commit, event: ReactMouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const menuWidth = 300;
+    const menuHeight = 420;
+    setBranchMenu(null);
+    setRefOverflowMenu({
+      refs,
+      commit,
       x: clamp(event.clientX, 8, Math.max(8, window.innerWidth - menuWidth - 8)),
       y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - menuHeight - 8))
     });
@@ -2950,6 +2990,7 @@ export default function App() {
                 onColumnResizeStart={startHistoryColumnResize}
                 onFilterChange={(next) => setHistoryFilters((current) => ({ ...current, ...next }))}
                 onOpenBranchMenu={openBranchMenu}
+                onOpenRefOverflow={openRefOverflowMenu}
                 onSelectBranch={selectBranchForInspection}
                 onOpenCommitMenu={(commitItem, event) => {
                   openBranchMenu(targetFromCommit(commitItem, snapshot), event);
@@ -3205,6 +3246,20 @@ export default function App() {
           snapshot={snapshot}
           onAction={handleBranchMenuAction}
           onClose={() => setBranchMenu(null)}
+        />
+      )}
+
+      {refOverflowMenu && (
+        <RefOverflowMenu
+          state={refOverflowMenu}
+          onSelect={(ref) => {
+            selectBranchForInspection(targetFromRef(ref, refOverflowMenu.commit, snapshot));
+            setRefOverflowMenu(null);
+          }}
+          onOpenBranchMenu={(ref, event) => {
+            openBranchMenu(targetFromRef(ref, refOverflowMenu.commit, snapshot), event);
+          }}
+          onClose={() => setRefOverflowMenu(null)}
         />
       )}
 
@@ -3501,6 +3556,64 @@ function BranchContextMenu({
             </button>
           )
         )}
+      </div>
+    </div>
+  );
+}
+
+function RefOverflowMenu({
+  state,
+  onSelect,
+  onOpenBranchMenu,
+  onClose
+}: {
+  state: RefOverflowMenuState;
+  onSelect: (ref: RefChip) => void;
+  onOpenBranchMenu: (ref: RefChip, event: ReactMouseEvent<HTMLElement>) => void;
+  onClose: () => void;
+}) {
+  const { refs, commit } = state;
+  const menuStyle = {
+    left: state.x,
+    top: state.y,
+    maxHeight: `calc(100vh - ${state.y + 12}px)`
+  } as CSSProperties;
+
+  return (
+    <div
+      className="branch-context-menu ref-overflow-menu"
+      style={menuStyle}
+      role="menu"
+      aria-label={`Refs at ${shortSha(commit.sha)}`}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <div className="branch-context-menu-header">
+        <span className="status-chip branch">{refs.length} ref{refs.length === 1 ? "" : "s"}</span>
+        <strong>Refs at this commit</strong>
+        <code>{shortSha(commit.sha)}</code>
+        <IconButton label="Close ref list" onClick={onClose}>
+          <X size={13} />
+        </IconButton>
+      </div>
+      <div className="branch-context-menu-list">
+        {refs.map((ref) => (
+          <button
+            key={`${commit.sha}-${ref.label}`}
+            type="button"
+            role="menuitem"
+            className="ref-overflow-row"
+            title={`Inspect ${ref.raw} (right-click for actions)`}
+            onClick={() => onSelect(ref)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              onOpenBranchMenu(ref, event);
+            }}
+          >
+            <span className="ref-overflow-dot" style={{ background: ref.color } as CSSProperties} />
+            <span className="ref-overflow-label">{ref.label}</span>
+            <small className={clsx("ref-overflow-kind", ref.kind)}>{ref.kind}</small>
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -4383,6 +4496,7 @@ function CommitGraphTable({
   onColumnResizeStart,
   onFilterChange,
   onOpenBranchMenu,
+  onOpenRefOverflow,
   onSelectBranch,
   onOpenCommitMenu,
   onSelect,
@@ -4407,6 +4521,7 @@ function CommitGraphTable({
   onColumnResizeStart: (column: HistoryColumnKey, event: ReactPointerEvent<HTMLButtonElement>) => void;
   onFilterChange: (next: Partial<HistoryFilters>) => void;
   onOpenBranchMenu: (target: BranchMenuTarget, event: ReactMouseEvent<HTMLElement>) => void;
+  onOpenRefOverflow: (refs: RefChip[], commit: Commit, event: ReactMouseEvent<HTMLElement>) => void;
   onSelectBranch: (target: BranchMenuTarget) => void;
   onOpenCommitMenu: (commit: Commit, event: ReactMouseEvent<HTMLElement>) => void;
   onSelect: (commit: Commit) => void;
@@ -4598,9 +4713,23 @@ function CommitGraphTable({
                     </button>
                   ))}
                   {row.refs.length > 2 && (
-                    <span className="ref-chip ref-chip-overflow" title={row.refs.slice(2).map((ref) => ref.raw).join(", ")}>
+                    <button
+                      type="button"
+                      className="ref-chip ref-chip-overflow"
+                      aria-haspopup="menu"
+                      aria-label={`Show ${row.refs.length - 2} more ref${row.refs.length - 2 === 1 ? "" : "s"} at ${shortSha(row.commit.sha)}`}
+                      title={row.refs.slice(2).map((ref) => ref.label).join("\n")}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onOpenRefOverflow(row.refs, row.commit, event);
+                      }}
+                      onContextMenu={(event) => {
+                        event.stopPropagation();
+                        onOpenRefOverflow(row.refs, row.commit, event);
+                      }}
+                    >
                       +{row.refs.length - 2}
-                    </span>
+                    </button>
                   )}
                   {rowStackItem && <span className={clsx("stack-row-chip", rowStackItem.status)}>{rowStackItem.status}</span>}
                 </>

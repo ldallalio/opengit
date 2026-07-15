@@ -947,9 +947,36 @@ async fn git_unstage(repo_path: String, paths: Vec<String>) -> CommandResult<Rep
 async fn git_discard(repo_path: String, paths: Vec<String>) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     let safe_paths = validate_file_paths(&paths)?;
-    let mut args = vec!["restore".into(), "--".into()];
-    args.extend(safe_paths);
-    run_git_with_safety_snapshot(&repo, "before discard", args).await?;
+    create_safety_snapshot(&repo, "before discard").await?;
+
+    // `git restore` only understands tracked content and errors with
+    // "pathspec ... did not match any file(s) known to git" on untracked files
+    // or directories, so partition the request: tracked paths are restored,
+    // while every path is also passed through `git clean` to remove untracked
+    // files/directories (a no-op where nothing untracked exists, which covers
+    // directories holding both tracked-modified and untracked files).
+    let mut tracked = Vec::new();
+    for path in &safe_paths {
+        let listed = run_git(
+            Some(&repo),
+            vec!["ls-files".into(), "--".into(), path.clone()],
+        )
+        .await?;
+        if !listed.trim().is_empty() {
+            tracked.push(path.clone());
+        }
+    }
+
+    if !tracked.is_empty() {
+        let mut restore_args = vec!["restore".into(), "--".into()];
+        restore_args.extend(tracked);
+        run_git(Some(&repo), restore_args).await?;
+    }
+
+    let mut clean_args = vec!["clean".into(), "-fd".into(), "--".into()];
+    clean_args.extend(safe_paths);
+    run_git(Some(&repo), clean_args).await?;
+
     build_snapshot(&repo, None).await
 }
 

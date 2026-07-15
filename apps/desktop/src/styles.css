@@ -2124,7 +2124,13 @@ body.resizing-layout-horizontal {
   border-color: var(--component-border);
   background: transparent;
   color: var(--muted);
-  cursor: help;
+  cursor: pointer;
+}
+
+.ref-chip-overflow:hover,
+.ref-chip-overflow:focus-visible {
+  border-color: var(--border-strong);
+  color: var(--text);
 }
 
 .stack-row-chip {
@@ -3772,6 +3778,51 @@ body.resizing-layout-horizontal {
   height: 1px;
   margin: 6px 4px;
   background: var(--border);
+}
+
+.ref-overflow-menu {
+  width: min(300px, calc(100vw - 16px));
+}
+
+.branch-context-menu-list button.ref-overflow-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0 9px;
+  text-align: left;
+}
+
+.branch-context-menu-list button.ref-overflow-row:hover,
+.branch-context-menu-list button.ref-overflow-row:focus-visible {
+  background: var(--panel-2);
+}
+
+.ref-overflow-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--panel) 60%, transparent);
+}
+
+.ref-overflow-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ref-overflow-kind {
+  color: var(--quiet);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .branch-switcher {
