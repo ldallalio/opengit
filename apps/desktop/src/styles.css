@@ -3645,10 +3645,19 @@ body.resizing-layout-horizontal {
   box-shadow: 0 18px 44px var(--shadow);
 }
 
-.prompt-dialog form {
+.prompt-dialog form,
+.prompt-dialog .confirm-body {
   display: grid;
   gap: 10px;
   padding: 14px 16px 16px;
+}
+
+.prompt-message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-line;
 }
 
 .prompt-header {

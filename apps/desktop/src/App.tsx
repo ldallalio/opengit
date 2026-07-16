@@ -293,6 +293,11 @@ type PromptRequest = {
   placeholder?: string;
   confirmLabel?: string;
 };
+type ConfirmRequest = {
+  message: string;
+  title?: string;
+  confirmLabel?: string;
+};
 type BranchMenuAction =
   | "pull"
   | "push"
@@ -689,6 +694,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [promptRequest, setPromptRequest] = useState<PromptRequest | null>(null);
   const promptResolverRef = useRef<((value: string | null) => void) | null>(null);
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
+  const confirmResolverRef = useRef<((value: boolean) => void) | null>(null);
   const [pushRecovery, setPushRecovery] = useState<PushRecoveryState | null>(null);
   const [lockRecovery, setLockRecovery] = useState<LockRecoveryState | null>(null);
   const [recentRepos, setRecentRepos] = useState<string[]>(loadRecentRepos);
@@ -1573,7 +1580,7 @@ export default function App() {
         fileAction("Unstage", change, unstagePaths);
         break;
       case "discard":
-        if (window.confirm(`Discard '${change.path}'?`)) {
+        if (await confirmAction(`Discard '${change.path}'?`, { title: "Discard changes", confirmLabel: "Discard" })) {
           fileAction("Discard", change, discardPaths);
         }
         break;
@@ -1626,7 +1633,7 @@ export default function App() {
         break;
       }
       case "delete":
-        if (window.confirm(`Delete '${change.path}' from disk? Untracked files cannot be recovered by Git.`)) {
+        if (await confirmAction(`Delete '${change.path}' from disk? Untracked files cannot be recovered by Git.`, { title: "Delete file", confirmLabel: "Delete" })) {
           void runSnapshotOperation("Delete file", () => deleteWorkingFile(repo, change.path));
         }
         break;
@@ -1706,6 +1713,24 @@ export default function App() {
     resolver?.(value);
   }, []);
 
+  // In-app confirm. Replaces window.confirm for the same reason as promptText:
+  // Tauri's macOS WebView (WKWebView) does not implement it and returns falsy
+  // without showing a dialog, so confirm-gated flows silently no-op.
+  const confirmAction = useCallback((message: string, options?: Omit<ConfirmRequest, "message">) => {
+    return new Promise<boolean>((resolve) => {
+      confirmResolverRef.current?.(false);
+      confirmResolverRef.current = resolve;
+      setConfirmRequest({ message, ...options });
+    });
+  }, []);
+
+  const resolveConfirm = useCallback((value: boolean) => {
+    const resolver = confirmResolverRef.current;
+    confirmResolverRef.current = null;
+    setConfirmRequest(null);
+    resolver?.(value);
+  }, []);
+
   const copyMenuText = async (label: string, value?: string) => {
     setBranchMenu(null);
     if (!value) {
@@ -1721,7 +1746,7 @@ export default function App() {
     }
   };
 
-  const runBranchTargetOperation = (
+  const runBranchTargetOperation = async (
     label: string,
     operation: (repo: string) => Promise<RepoSnapshot>,
     confirmMessage?: string
@@ -1729,7 +1754,7 @@ export default function App() {
     const repo = requireRepo();
     if (!repo) return;
     setBranchMenu(null);
-    if (confirmMessage && !window.confirm(confirmMessage)) return;
+    if (confirmMessage && !(await confirmAction(confirmMessage, { title: label }))) return;
     void runSnapshotOperation(label, () => operation(repo));
   };
 
@@ -2079,20 +2104,20 @@ export default function App() {
     void runSnapshotOperation("Create stack child branch", () => createStackChild(repo, selectedStack.id, base, name.trim()));
   };
 
-  const restackSelectedStack = () => {
+  const restackSelectedStack = async () => {
     const repo = requireRepo();
     if (!repo || !selectedStack) {
       setError("Select a stack before restacking.");
       return;
     }
-    if (!window.confirm(`Restack '${selectedStack.name}' from ${selectedStack.trunk}? OpenGit will create a safety snapshot first.`)) return;
+    if (!(await confirmAction(`Restack '${selectedStack.name}' from ${selectedStack.trunk}? OpenGit will create a safety snapshot first.`, { title: "Restack stack", confirmLabel: "Restack" }))) return;
     void runSnapshotOperation("Restack stack", () => restackStack(repo, selectedStack.id));
   };
 
-  const syncSelectedStackTrunk = () => {
+  const syncSelectedStackTrunk = async () => {
     const repo = requireRepo();
     if (!repo || !selectedStack) return;
-    if (!window.confirm(`Checkout and fast-forward pull trunk '${selectedStack.trunk}'?`)) return;
+    if (!(await confirmAction(`Checkout and fast-forward pull trunk '${selectedStack.trunk}'?`, { title: "Sync trunk" }))) return;
     void runSnapshotOperation("Sync stack trunk", () => syncStackTrunk(repo, selectedStack.id));
   };
 
@@ -2122,10 +2147,10 @@ export default function App() {
     void runSnapshotOperation("Reorder stack", () => reorderStack(repo, selectedStack.id, names));
   };
 
-  const removeSelectedStackBranch = (branch: string) => {
+  const removeSelectedStackBranch = async (branch: string) => {
     const repo = requireRepo();
     if (!repo || !selectedStack) return;
-    if (!window.confirm(`Remove '${branch}' from '${selectedStack.name}'? This does not delete the branch.`)) return;
+    if (!(await confirmAction(`Remove '${branch}' from '${selectedStack.name}'? This does not delete the branch.`, { title: "Remove from stack", confirmLabel: "Remove" }))) return;
     void runSnapshotOperation("Remove branch from stack", () => removeBranchFromStack(repo, selectedStack.id, branch));
   };
 
@@ -2194,10 +2219,10 @@ export default function App() {
     void runSnapshotOperation("Commit lane", () => commitLane(repo, selectedLane.id, message.trim()));
   };
 
-  const discardSelectedLane = () => {
+  const discardSelectedLane = async () => {
     const repo = requireRepo();
     if (!repo || !selectedLane) return;
-    if (!window.confirm(`Discard lane '${selectedLane.name}'? OpenGit will create a safety snapshot first.`)) return;
+    if (!(await confirmAction(`Discard lane '${selectedLane.name}'? OpenGit will create a safety snapshot first.`, { title: "Discard lane", confirmLabel: "Discard" }))) return;
     void runSnapshotOperation("Discard lane", () => discardLane(repo, selectedLane.id));
   };
 
@@ -2310,7 +2335,7 @@ export default function App() {
     }
   };
 
-  const updateSelectedCommitMessage = () => {
+  const updateSelectedCommitMessage = async () => {
     const repo = requireRepo();
     if (!repo || !selectedCommit) return;
     if (selectedCommitIsHead && stagedChanges.length > 0) {
@@ -2326,18 +2351,19 @@ export default function App() {
       return;
     }
     if (!selectedCommitIsHead) {
-      const confirmed = window.confirm(
-        "Reword this older commit? OpenGit will create a safety snapshot, then rewrite the current branch's linear history. If the branch was pushed, you may need force-with-lease."
+      const confirmed = await confirmAction(
+        "Reword this older commit? OpenGit will create a safety snapshot, then rewrite the current branch's linear history. If the branch was pushed, you may need force-with-lease.",
+        { title: "Reword commit", confirmLabel: "Reword" }
       );
       if (!confirmed) return;
     }
     void runSnapshotOperation("Update commit message", () => updateCommitMessage(repo, selectedCommit.sha, selectedCommitMessage.trim()));
   };
 
-  const undoLastCommitAction = () => {
+  const undoLastCommitAction = async () => {
     const repo = requireRepo();
     if (!repo) return;
-    if (!window.confirm("Undo the last commit and keep its changes unstaged? OpenGit will create a safety snapshot first.")) return;
+    if (!(await confirmAction("Undo the last commit and keep its changes unstaged? OpenGit will create a safety snapshot first.", { title: "Undo last commit", confirmLabel: "Undo" }))) return;
     void runSnapshotOperation("Undo last commit", () => undoLastCommit(repo));
   };
 
@@ -2352,14 +2378,14 @@ export default function App() {
       confirmLabel: "Continue"
     });
     if (!message?.trim()) return;
-    if (!window.confirm("Squash the last two linear commits? OpenGit will create a safety snapshot first.")) return;
+    if (!(await confirmAction("Squash the last two linear commits? OpenGit will create a safety snapshot first.", { title: "Squash commits", confirmLabel: "Squash" }))) return;
     void runSnapshotOperation("Squash last commits", () => squashLastCommits(repo, message.trim()));
   };
 
-  const restoreUndoSnapshotAction = (snapshotId: string, label: string) => {
+  const restoreUndoSnapshotAction = async (snapshotId: string, label: string) => {
     const repo = requireRepo();
     if (!repo) return;
-    if (!window.confirm(`Restore safety snapshot '${label}'? Current HEAD and patches will be snapshotted first.`)) return;
+    if (!(await confirmAction(`Restore safety snapshot '${label}'? Current HEAD and patches will be snapshotted first.`, { title: "Restore snapshot", confirmLabel: "Restore" }))) return;
     void runSnapshotOperation("Restore safety snapshot", () => restoreUndoSnapshot(repo, snapshotId));
   };
 
@@ -2487,14 +2513,14 @@ export default function App() {
     void runSnapshotOperation("Pull rebase", () => pullRepoRebase(snapshot.repository.path));
   };
 
-  const forcePushAfterRejectedPush = () => {
+  const forcePushAfterRejectedPush = async () => {
     if (!snapshot || !pushRecovery) {
       return;
     }
 
     const branch = pushRecovery.branch ?? snapshot.currentBranch;
     const branchLabel = branch ? `'${branch}'` : "the current branch";
-    if (!window.confirm(`Force push ${branchLabel} with --force-with-lease?`)) {
+    if (!(await confirmAction(`Force push ${branchLabel} with --force-with-lease?`, { title: "Force push", confirmLabel: "Force push" }))) {
       return;
     }
 
@@ -2543,9 +2569,9 @@ export default function App() {
     void runSnapshotOperation("Continue operation", () => continueGitOperation(snapshot.repository.path));
   };
 
-  const abortCurrentGitOperation = () => {
+  const abortCurrentGitOperation = async () => {
     if (!snapshot) return;
-    if (!window.confirm("Abort the current Git operation and return the repository to the previous state?")) return;
+    if (!(await confirmAction("Abort the current Git operation and return the repository to the previous state?", { title: "Abort operation", confirmLabel: "Abort" }))) return;
     void runSnapshotOperation("Abort operation", () => abortGitOperation(snapshot.repository.path));
   };
 
@@ -2827,9 +2853,9 @@ export default function App() {
             pushInspectedBranch={pushInspectedBranch}
             openInspectorBranchMenu={openInspectorBranchMenu}
             selectCommitBySha={selectCommitBySha}
-            deleteBranch={(name) => {
+            deleteBranch={async (name) => {
               const repo = requireRepo();
-              if (repo && window.confirm(`Delete branch '${name}'?`)) {
+              if (repo && (await confirmAction(`Delete branch '${name}'?`, { title: "Delete branch", confirmLabel: "Delete" }))) {
                 void runSnapshotOperation("Delete branch", () => deleteBranch(repo, name, false));
               }
             }}
@@ -2837,9 +2863,9 @@ export default function App() {
               const repo = requireRepo();
               if (repo) void runSnapshotOperation("Apply stash", () => stashApply(repo, stash));
             }}
-            dropStash={(stash) => {
+            dropStash={async (stash) => {
               const repo = requireRepo();
-              if (repo && window.confirm(`Drop ${stash}?`)) {
+              if (repo && (await confirmAction(`Drop ${stash}?`, { title: "Drop stash", confirmLabel: "Drop" }))) {
                 void runSnapshotOperation("Drop stash", () => stashDrop(repo, stash));
               }
             }}
@@ -3207,8 +3233,8 @@ export default function App() {
                       bulkLabel="Stage All"
                       primaryAction={(change) => fileAction("Stage", change, stagePaths)}
                       primaryLabel="Stage"
-                      secondaryAction={(change) => {
-                        if (window.confirm(`Discard '${change.path}'?`)) {
+                      secondaryAction={async (change) => {
+                        if (await confirmAction(`Discard '${change.path}'?`, { title: "Discard changes", confirmLabel: "Discard" })) {
                           fileAction("Discard", change, discardPaths);
                         }
                       }}
@@ -3228,8 +3254,8 @@ export default function App() {
                       bulkLabel="Unstage All"
                       primaryAction={(change) => fileAction("Unstage", change, unstagePaths)}
                       primaryLabel="Unstage"
-                      secondaryAction={(change) => {
-                        if (window.confirm(`Discard '${change.path}'?`)) {
+                      secondaryAction={async (change) => {
+                        if (await confirmAction(`Discard '${change.path}'?`, { title: "Discard changes", confirmLabel: "Discard" })) {
                           fileAction("Discard", change, discardPaths);
                         }
                       }}
@@ -3386,6 +3412,13 @@ export default function App() {
           onCancel={() => resolvePrompt(null)}
         />
       )}
+      {confirmRequest && (
+        <ConfirmDialog
+          request={confirmRequest}
+          onConfirm={() => resolveConfirm(true)}
+          onCancel={() => resolveConfirm(false)}
+        />
+      )}
     </main>
   );
 }
@@ -3454,6 +3487,52 @@ function PromptDialog({
             </Button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmDialog({
+  request,
+  onConfirm,
+  onCancel
+}: {
+  request: ConfirmRequest;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="prompt-backdrop" onMouseDown={onCancel}>
+      <div
+        className="prompt-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-label={request.title ?? "Confirm"}
+        onMouseDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+        }}
+      >
+        <div className="confirm-body">
+          <div className="prompt-header">
+            <h2>{request.title ?? "Confirm"}</h2>
+            <IconButton label="Close" onClick={onCancel}>
+              <X size={14} />
+            </IconButton>
+          </div>
+          <p className="prompt-message">{request.message}</p>
+          <div className="prompt-actions">
+            <Button type="button" variant="ghost" onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button type="button" variant="danger" onClick={onConfirm} autoFocus>
+              {request.confirmLabel ?? "OK"}
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -6704,18 +6783,7 @@ function PreferencesPanel({
                   </Button>
                   {azureDevOpsMessage && <div className="settings-note">{azureDevOpsMessage}</div>}
                 </div>
-              ) : (
-                <div className="integration-detail">
-                  <h3>{integration}</h3>
-                  <p>Provider account support is planned after the local Git workflow stabilizes.</p>
-                  <Button variant="secondary" disabled>
-                    Connect {integration}
-                  </Button>
-                  <div className="settings-note">
-                    Future scope: OAuth, PR list, PR creation, checks, reviewers, labels, and branch protection awareness.
-                  </div>
-                </div>
-              )}
+              ) : null}
             </div>
           </PreferenceSection>
         )}
@@ -7293,7 +7361,6 @@ function branchMenuItems(target: BranchMenuTarget, snapshot: RepoSnapshot | null
       disabled: !canCheckout,
       hint: target.isCommitOnly ? "not a branch" : target.isCurrent ? "already checked out" : undefined
     },
-    { type: "item", action: "create-worktree", label: `Create worktree from ${target.name}`, disabled: true, hint: "post-MVP" },
     { type: "separator", key: "stack" },
     { type: "item", action: "stack-create", label: `Create stack from ${target.name}`, disabled: !localBranch },
     { type: "item", action: "stack-add", label: `Add ${target.name} to selected stack`, disabled: !localBranch || !(snapshot?.branchStacks.length ?? 0) },
@@ -7303,11 +7370,7 @@ function branchMenuItems(target: BranchMenuTarget, snapshot: RepoSnapshot | null
     { type: "separator", key: "commit" },
     { type: "item", action: "create-branch", label: "Create branch here", disabled: target.isUnborn },
     { type: "item", action: "cherry-pick", label: "Cherry pick commit", disabled: !target.commitSha },
-    { type: "item", action: "reset", label: `Reset ${currentBranch} to this commit`, disabled: true, hint: "destructive action pending" },
     { type: "item", action: "revert", label: "Revert commit", disabled: !target.commitSha },
-    { type: "separator", key: "provider" },
-    { type: "item", action: "open-pr", label: `Start a pull request from ${target.name}`, disabled: true, hint: "GitHub adapter pending" },
-    { type: "item", action: "explain", label: "Explain Branch Changes (Preview)", disabled: true, hint: "AI adapter pending" },
     { type: "separator", key: "manage" },
     {
       type: "item",
@@ -7324,25 +7387,9 @@ function branchMenuItems(target: BranchMenuTarget, snapshot: RepoSnapshot | null
       disabled: !canDelete,
       hint: target.isCurrent ? "current branch" : target.isProtected ? "protected branch" : !localBranch ? `not a local ${branchRef}` : undefined
     },
-    {
-      type: "item",
-      action: "delete-remote",
-      label: target.isRemote ? `Delete ${target.name}` : `Delete remote for ${target.name}`,
-      danger: true,
-      disabled: true,
-      hint: "remote delete pending"
-    },
     { type: "separator", key: "copy" },
     { type: "item", action: "copy-name", label: target.isTag ? "Copy tag name" : "Copy branch name" },
     { type: "item", action: "copy-sha", label: "Copy commit sha", disabled: !target.commitSha },
-    { type: "item", action: "copy-branch-link", label: `Copy link to ${target.isTag ? "tag" : "branch"}`, disabled: true, hint: "provider URL pending" },
-    { type: "item", action: "copy-commit-link", label: "Copy link to this commit on remote", disabled: true, hint: "provider URL pending" },
-    { type: "separator", key: "patch" },
-    { type: "item", action: "create-patch", label: "Create patch from commit", disabled: true, hint: "post-MVP" },
-    { type: "item", action: "share-patch", label: "Share commit as Cloud Patch", disabled: true, hint: "post-MVP" },
-    { type: "separator", key: "view" },
-    { type: "item", action: "pin-left", label: "Pin to Left", disabled: true, hint: "post-MVP" },
-    { type: "item", action: "solo", label: "Solo", disabled: true, hint: "post-MVP" },
     { type: "separator", key: "tags" },
     { type: "item", action: "create-tag", label: "Create tag here", disabled: target.isUnborn },
     { type: "item", action: "create-annotated-tag", label: "Create annotated tag here", disabled: target.isUnborn }
