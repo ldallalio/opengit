@@ -104,7 +104,7 @@ export async function chooseRepositoryFolder(): Promise<string | null> {
 
 export async function chooseCloneRootFolder(): Promise<string | null> {
   if (!isTauriRuntime()) {
-    return window.prompt("Default clone root", "/Users/logandallalio/Documents");
+    return window.prompt("Default clone root", "~/Projects");
   }
 
   const selected = await openDialog({
