@@ -64,6 +64,17 @@ export const isTauriRuntime = () => {
   return isTauri() || typeof internals?.invoke === "function";
 };
 
+// window.open is a no-op inside the Tauri webview; external links must go
+// through the opener plugin.
+export async function openExternalUrl(url: string): Promise<void> {
+  if (isTauriRuntime()) {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(url);
+    return;
+  }
+  window.open(url, "_blank");
+}
+
 async function call<T>(command: string, args: Record<string, unknown>, fallback: T): Promise<T> {
   if (!isTauriRuntime()) {
     await new Promise((resolve) => window.setTimeout(resolve, 120));

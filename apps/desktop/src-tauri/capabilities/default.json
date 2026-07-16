@@ -3,5 +3,13 @@
   "identifier": "default",
   "description": "Default desktop capability for OpenGit.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default", "updater:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "updater:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://**" }]
+    }
+  ]
 }
