@@ -30,6 +30,7 @@ import { Button, EmptyState, IconButton, Panel } from "@opengit/ui";
 import {
   AlertTriangle,
   Activity,
+  Bug,
   ArrowDownToLine,
   Boxes,
   Check,
@@ -71,6 +72,8 @@ import {
   X
 } from "lucide-react";
 import { clsx } from "clsx";
+import { getVersion } from "@tauri-apps/api/app";
+import { isTauri } from "@tauri-apps/api/core";
 import {
   addBranchToStack,
   addRemote,
@@ -2546,6 +2549,27 @@ export default function App() {
     void runSnapshotOperation("Abort operation", () => abortGitOperation(snapshot.repository.path));
   };
 
+  const openIssueReport = async () => {
+    let version = "dev";
+    if (isTauri()) {
+      try {
+        version = await getVersion();
+      } catch {
+        /* fall back to "dev" outside the Tauri shell */
+      }
+    }
+    const body = [
+      "### Describe the issue",
+      "",
+      "",
+      "### Environment",
+      `- OpenGit: ${version}`,
+      `- Platform: ${navigator.platform}`,
+      `- User agent: ${navigator.userAgent}`
+    ].join("\n");
+    window.open(`https://github.com/ldallalio/opengit/issues/new?body=${encodeURIComponent(body)}`, "_blank");
+  };
+
   return (
     <main className="app-shell">
       <aside className="rail" aria-label="Primary">
@@ -2568,6 +2592,9 @@ export default function App() {
           <UploadCloud size={18} />
         </IconButton>
         <div className="rail-spacer" />
+        <IconButton label="Report an issue" onClick={() => void openIssueReport()}>
+          <Bug size={18} />
+        </IconButton>
         <IconButton label="Preferences" onClick={() => setPreferencesOpen(true)}>
           <Settings size={18} />
         </IconButton>
