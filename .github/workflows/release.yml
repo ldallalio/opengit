@@ -18,10 +18,10 @@ jobs:
         include:
           - platform: macos-latest
             targetLabel: arm64
-            args: --target aarch64-apple-darwin --bundles app
+            args: --target aarch64-apple-darwin --bundles app,dmg
           - platform: macos-latest
             targetLabel: x64
-            args: --target x86_64-apple-darwin --bundles app
+            args: --target x86_64-apple-darwin --bundles app,dmg
           - platform: ubuntu-22.04
             targetLabel: x64
             args: ""
@@ -64,14 +64,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS code signing + notarization. When these secrets are unset the
+          # build proceeds unsigned, so non-macOS and fork builds keep working.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
           releaseName: OpenGit ${{ github.ref_name }}
           releaseBody: |
-            Alpha release build.
+            Beta release build.
 
-            These artifacts are updater-signed by Tauri, but platform code signing/notarization is not configured yet. macOS DMG packaging is intentionally deferred until notarization is configured.
+            Artifacts are updater-signed by Tauri. macOS bundles are code-signed and notarized when signing secrets are configured; Windows binaries are currently unsigned.
           releaseDraft: true
           prerelease: true
           args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
