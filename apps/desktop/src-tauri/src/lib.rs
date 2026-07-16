@@ -1787,7 +1787,7 @@ async fn git_branch_rename(
         vec!["branch".into(), "-m".into(), old_name.clone(), new_name.clone()],
     )
     .await?;
-    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let mut stacks = read_branch_stacks(&repo).await?;
     for stack in &mut stacks {
         if stack.trunk == old_name {
             stack.trunk = new_name.clone();
@@ -1874,7 +1874,7 @@ async fn git_stack_create(request: StackCreateRequest) -> CommandResult<RepoSnap
         updated_at: now,
     };
     stack_resequence_items(&mut stack);
-    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let mut stacks = read_branch_stacks(&repo).await?;
     stacks.push(stack);
     write_branch_stacks(&repo, &stacks).await?;
     build_snapshot(&repo, None).await
@@ -1897,7 +1897,7 @@ async fn git_stack_create_child(request: StackCreateChildRequest) -> CommandResu
     )
     .await?;
 
-    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let mut stacks = read_branch_stacks(&repo).await?;
     let stack = find_stack_mut(&mut stacks, &stack_id)?;
     let insert_at = stack
         .items
@@ -1932,7 +1932,7 @@ async fn git_stack_add_branch(request: StackAddBranchRequest) -> CommandResult<R
     if !git_ref_exists(&repo, &request.branch).await {
         return invalid("INVALID_REF", "Branch does not exist.");
     }
-    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let mut stacks = read_branch_stacks(&repo).await?;
     let stack = find_stack_mut(&mut stacks, &stack_id)?;
     if stack.trunk == request.branch || stack.items.iter().any(|item| item.branch == request.branch) {
         return invalid("STACK_DUPLICATE_BRANCH", "That branch is already in this stack.");
@@ -1963,7 +1963,7 @@ async fn git_stack_add_branch(request: StackAddBranchRequest) -> CommandResult<R
 async fn git_stack_reorder(request: StackReorderRequest) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&request.repo_path).await?;
     let stack_id = validate_metadata_id(&request.stack_id, "stack id")?;
-    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let mut stacks = read_branch_stacks(&repo).await?;
     let stack = find_stack_mut(&mut stacks, &stack_id)?;
     let mut reordered = Vec::new();
     for branch in request.ordered_branch_names {
@@ -1989,7 +1989,7 @@ async fn git_stack_remove_branch(
     let repo = resolve_repo_root(&repo_path).await?;
     let stack_id = validate_metadata_id(&stack_id, "stack id")?;
     validate_ref_arg(&branch, "stack branch")?;
-    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let mut stacks = read_branch_stacks(&repo).await?;
     let stack = find_stack_mut(&mut stacks, &stack_id)?;
     stack.items.retain(|item| item.branch != branch);
     stack.last_operation = Some(format!("Removed {branch} from stack"));
@@ -2003,7 +2003,7 @@ async fn git_stack_restack(repo_path: String, stack_id: String) -> CommandResult
     let repo = resolve_repo_root(&repo_path).await?;
     let stack_id = validate_metadata_id(&stack_id, "stack id")?;
     ensure_clean_worktree(&repo, "Restack").await?;
-    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let mut stacks = read_branch_stacks(&repo).await?;
     let stack = find_stack_mut(&mut stacks, &stack_id)?.clone();
     let original_branch = current_branch_name(&repo).await;
     create_safety_snapshot(&repo, "before stack restack").await?;
@@ -2051,7 +2051,7 @@ async fn git_stack_sync_trunk(repo_path: String, stack_id: String) -> CommandRes
     let repo = resolve_repo_root(&repo_path).await?;
     let stack_id = validate_metadata_id(&stack_id, "stack id")?;
     ensure_clean_worktree(&repo, "Sync trunk").await?;
-    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let mut stacks = read_branch_stacks(&repo).await?;
     let stack = find_stack_mut(&mut stacks, &stack_id)?.clone();
     create_safety_snapshot(&repo, "before stack trunk sync").await?;
     let original_branch = current_branch_name(&repo).await;
@@ -2073,7 +2073,7 @@ async fn git_stack_sync_trunk(repo_path: String, stack_id: String) -> CommandRes
 async fn git_stack_push(repo_path: String, stack_id: String) -> CommandResult<RepoSnapshot> {
     let repo = resolve_repo_root(&repo_path).await?;
     let stack_id = validate_metadata_id(&stack_id, "stack id")?;
-    let mut stacks = read_branch_stacks(&repo).await.unwrap_or_default();
+    let mut stacks = read_branch_stacks(&repo).await?;
     let stack = find_stack_mut(&mut stacks, &stack_id)?.clone();
     let remotes = parse_remotes(&run_git(Some(&repo), vec!["remote".into(), "-v".into()]).await?);
     let remote = remotes
@@ -2134,7 +2134,7 @@ async fn git_lane_create(request: LaneCreateRequest) -> CommandResult<RepoSnapsh
         updated_at: now,
     };
     capture_paths_into_lane(&repo, &mut lane, &request.paths).await?;
-    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let mut lanes = read_parallel_lanes(&repo).await?;
     lanes.push(lane);
     write_parallel_lanes(&repo, &lanes).await?;
     build_snapshot(&repo, None).await
@@ -2145,7 +2145,7 @@ async fn git_lane_assign_paths(request: LaneAssignPathsRequest) -> CommandResult
     let repo = resolve_repo_root(&request.repo_path).await?;
     let lane_id = validate_metadata_id(&request.lane_id, "lane id")?;
     create_safety_snapshot(&repo, "before assign to parallel lane").await?;
-    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let mut lanes = read_parallel_lanes(&repo).await?;
     let lane = find_lane_mut(&mut lanes, &lane_id)?;
     if lane.applied {
         return invalid("LANE_APPLIED", "Unapply this lane before assigning more files to it.");
@@ -2160,7 +2160,7 @@ async fn git_lane_apply(repo_path: String, lane_id: String) -> CommandResult<Rep
     let repo = resolve_repo_root(&repo_path).await?;
     let lane_id = validate_metadata_id(&lane_id, "lane id")?;
     create_safety_snapshot(&repo, "before parallel lane apply").await?;
-    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let mut lanes = read_parallel_lanes(&repo).await?;
     let lane = find_lane_mut(&mut lanes, &lane_id)?;
     let operation = GitWorkflowOperation {
         id: metadata_id("operation", "lane-apply"),
@@ -2192,7 +2192,7 @@ async fn git_lane_unapply(repo_path: String, lane_id: String) -> CommandResult<R
     let repo = resolve_repo_root(&repo_path).await?;
     let lane_id = validate_metadata_id(&lane_id, "lane id")?;
     create_safety_snapshot(&repo, "before parallel lane unapply").await?;
-    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let mut lanes = read_parallel_lanes(&repo).await?;
     let lane = find_lane_mut(&mut lanes, &lane_id)?;
     let operation = GitWorkflowOperation {
         id: metadata_id("operation", "lane-unapply"),
@@ -2227,7 +2227,7 @@ async fn git_lane_commit(request: LaneCommitRequest) -> CommandResult<RepoSnapsh
     }
     let lane_id = validate_metadata_id(&request.lane_id, "lane id")?;
     create_safety_snapshot(&repo, "before parallel lane commit").await?;
-    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let mut lanes = read_parallel_lanes(&repo).await?;
     let lane = find_lane_mut(&mut lanes, &lane_id)?;
     let current = current_branch_name(&repo).await.unwrap_or_default();
     if current != lane.target_branch {
@@ -2255,7 +2255,7 @@ async fn git_lane_discard(repo_path: String, lane_id: String) -> CommandResult<R
     let repo = resolve_repo_root(&repo_path).await?;
     let lane_id = validate_metadata_id(&lane_id, "lane id")?;
     create_safety_snapshot(&repo, "before parallel lane discard").await?;
-    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let mut lanes = read_parallel_lanes(&repo).await?;
     if let Some(index) = lanes.iter().position(|lane| lane.id == lane_id) {
         let mut lane = lanes[index].clone();
         if lane.applied {
@@ -2281,7 +2281,7 @@ async fn git_lane_materialize_branch(request: LaneMaterializeBranchRequest) -> C
     }
     ensure_clean_worktree(&repo, "Materialize lane").await?;
     create_safety_snapshot(&repo, "before materialize parallel lane").await?;
-    let mut lanes = read_parallel_lanes(&repo).await.unwrap_or_default();
+    let mut lanes = read_parallel_lanes(&repo).await?;
     let lane = find_lane_mut(&mut lanes, &lane_id)?;
     run_git(
         Some(&repo),
@@ -2392,7 +2392,13 @@ async fn git_conflict_versions(repo_path: String, path: String) -> CommandResult
     let repo = resolve_repo_root(&repo_path).await?;
     let mut safe_paths = validate_file_paths(&[path])?;
     let path = safe_paths.remove(0);
-    let working = std::fs::read_to_string(repo.join(&path)).unwrap_or_default();
+    // A missing file is a valid delete-side conflict; any other read failure must
+    // surface instead of rendering the pane as silently empty.
+    let working = match std::fs::read_to_string(repo.join(&path)) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
     let diff = run_git(
         Some(&repo),
         vec![
@@ -2456,6 +2462,14 @@ async fn git_conflict_resolve(
             create_safety_snapshot(&repo, "before conflict resolve").await?;
             let ours = git_show_stage(&repo, 2, &path).await.unwrap_or_default();
             let theirs = git_show_stage(&repo, 3, &path).await.unwrap_or_default();
+            // Both stages empty means the content could not be read at all; writing
+            // an empty resolution would silently discard both sides.
+            if ours.is_empty() && theirs.is_empty() {
+                return invalid(
+                    "CONFLICT_CONTENT_UNAVAILABLE",
+                    "Could not read either side of the conflict; resolve it manually instead.",
+                );
+            }
             let combined = combine_conflict_sides(&ours, &theirs);
             std::fs::write(repo.join(&path), combined)?;
         }
