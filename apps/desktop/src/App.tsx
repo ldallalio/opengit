@@ -159,7 +159,8 @@ import {
   resolveConflict,
   type AiPrDescriptionSuggestion,
   type ConflictStrategy,
-  type ConflictVersions
+  type ConflictVersions,
+  openExternalUrl
 } from "./api";
 import { demoSnapshot } from "./demo";
 import {
@@ -2593,7 +2594,7 @@ export default function App() {
       `- Platform: ${navigator.platform}`,
       `- User agent: ${navigator.userAgent}`
     ].join("\n");
-    window.open(`https://github.com/ldallalio/opengit/issues/new?body=${encodeURIComponent(body)}`, "_blank");
+    await openExternalUrl(`https://github.com/ldallalio/opengit/issues/new?body=${encodeURIComponent(body)}`);
   };
 
   return (
@@ -5881,7 +5882,7 @@ function RepositoryManagementPanel({
                         <IconButton label="Refresh repositories" onClick={refresh} disabled={loading}>
                           <RefreshCw size={13} />
                         </IconButton>
-                        <IconButton label="Open provider link" disabled={!repo.webUrl} onClick={() => repo.webUrl && window.open(repo.webUrl, "_blank")}>
+                        <IconButton label="Open provider link" disabled={!repo.webUrl} onClick={() => repo.webUrl && void openExternalUrl(repo.webUrl)}>
                           <ExternalLink size={13} />
                         </IconButton>
                       </div>
