@@ -1732,6 +1732,32 @@ export default function App() {
     resolver?.(value);
   }, []);
 
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    const checkForUpdate = async () => {
+      try {
+        const { check } = await import("@tauri-apps/plugin-updater");
+        const update = await check();
+        if (cancelled || !update) return;
+        const install = await confirmAction(
+          `OpenGit ${update.version} is available. Download and install it now? The app restarts when the update finishes.`,
+          { title: "Update available", confirmLabel: "Install update" }
+        );
+        if (!install) return;
+        await update.downloadAndInstall();
+        const { relaunch } = await import("@tauri-apps/plugin-process");
+        await relaunch();
+      } catch {
+        /* update checks are best-effort; never block startup on them */
+      }
+    };
+    void checkForUpdate();
+    return () => {
+      cancelled = true;
+    };
+  }, [confirmAction]);
+
   const copyMenuText = async (label: string, value?: string) => {
     setBranchMenu(null);
     if (!value) {
