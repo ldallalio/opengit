@@ -3,8 +3,8 @@
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   font-size: 12px;
   line-height: 1.4;
-  background: #0d1117;
-  color: #e6edf3;
+  background: var(--panel-2);
+  color: var(--text);
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-mono: "SF Mono", "Cascadia Code", ui-monospace, Menlo, Monaco, Consolas, monospace;
   --bg: #0d1117;
@@ -47,6 +47,13 @@
   --remote-pill-bg: #1e1a2d;
   --remote-pill-text: #8b949e;
   --remote-pill-border: #30363d;
+  --row-selected: #1a2638;
+  --row-hover: #121820;
+  --panel-header-bg: #111820;
+  --warn-surface: #1c1a11;
+  --warn-surface-strong: #2c2413;
+  --success-bg: #16351f;
+  --success-text: #3fb950;
 }
 
 :root[data-theme="light"] {
@@ -75,6 +82,28 @@
   --warning: #946816;
   --focus: #006db3;
   --shadow: rgba(33, 31, 26, 0.14);
+  --feature-pill-bg: #f0e8fc;
+  --feature-pill-text: #6639ba;
+  --feature-pill-border: #d3bff0;
+  --main-pill-bg: #dceafc;
+  --main-pill-text: #1a5fb4;
+  --main-pill-border: #a9cbf0;
+  --release-pill-bg: #f7ecd2;
+  --release-pill-text: #7d5a00;
+  --release-pill-border: #e0c489;
+  --wip-pill-bg: #fbe3e0;
+  --wip-pill-text: #b3261e;
+  --wip-pill-border: #ecb2ad;
+  --remote-pill-bg: #ece9e0;
+  --remote-pill-text: #5f5c52;
+  --remote-pill-border: #d6d0c2;
+  --row-selected: #dbe7e1;
+  --row-hover: #eeece4;
+  --panel-header-bg: #efece3;
+  --warn-surface: #f5eed9;
+  --warn-surface-strong: #f3e7c8;
+  --success-bg: #dcefdf;
+  --success-text: #1a7f37;
 }
 
 * {
@@ -212,12 +241,12 @@ textarea:focus-visible {
   min-width: 132px;
   height: 35px;
   border-right: 1px solid var(--border);
-  background: #161b22;
+  background: var(--panel);
 }
 
 .repo-tab.active {
-  background: #0d1117;
-  box-shadow: inset 0 -2px 0 #58a6ff;
+  background: var(--panel-2);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 .repo-tab-main,
@@ -358,13 +387,13 @@ textarea:focus-visible {
 .topbar-git-actions .og-icon-button:hover:not(:disabled),
 .topbar-git-actions .og-icon-button:focus-visible {
   border-color: var(--component-border);
-  background: #0d1117;
+  background: var(--panel-2);
   color: var(--text);
 }
 
 .parallel-toggle.active {
-  border-color: #58a6ff;
-  color: #79c0ff;
+  border-color: var(--accent);
+  color: var(--main-pill-text);
 }
 
 .repo-identity-strip {
@@ -565,9 +594,9 @@ textarea {
   align-items: center;
   min-height: 34px;
   padding: 6px 12px;
-  border-bottom: 1px solid color-mix(in srgb, #58a6ff 48%, transparent);
-  background: #1a3a6b;
-  color: #e6edf3;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 48%, transparent);
+  background: var(--main-pill-bg);
+  color: var(--text);
 }
 
 .push-recovery-banner span {
@@ -588,8 +617,8 @@ textarea {
   border: 1px solid var(--component-border);
   border-radius: 2px;
   padding: 0 10px;
-  background: #161b22;
-  color: #e6edf3;
+  background: var(--panel);
+  color: var(--text);
   font: inherit;
   font-weight: 700;
   cursor: pointer;
@@ -601,22 +630,22 @@ textarea {
 }
 
 .banner-action.pull {
-  border-color: #3fb950;
-  background: #16351f;
+  border-color: var(--success-text);
+  background: var(--success-bg);
 }
 
 .banner-action.rebase {
-  border-color: #58a6ff;
-  background: #1a3a6b;
+  border-color: var(--accent);
+  background: var(--main-pill-bg);
 }
 
 .banner-action.force {
-  border-color: #ff7b72;
-  background: #3d1a1a;
+  border-color: var(--danger);
+  background: var(--wip-pill-bg);
 }
 
 .banner-action.cancel {
-  background: #30363d;
+  background: var(--border-strong);
 }
 
 .conflict-recovery-banner {
@@ -627,8 +656,8 @@ textarea {
   min-height: 34px;
   padding: 6px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--warning) 55%, transparent);
-  background: #3d2914;
-  color: #e6edf3;
+  background: var(--release-pill-bg);
+  color: var(--text);
 }
 
 .conflict-recovery-banner > span {
@@ -885,7 +914,7 @@ body.resizing-layout-horizontal {
 .sidebar .og-panel-collapsed .og-panel-header {
   min-height: 32px;
   border-bottom: 0;
-  background: #111820;
+  background: var(--panel-header-bg);
 }
 
 .sidebar .og-panel-collapsed .og-panel-actions {
@@ -962,9 +991,9 @@ body.resizing-layout-horizontal {
 }
 
 .panel-action-group .og-icon-button.active {
-  border-color: #58a6ff;
-  background: #1a3a6b;
-  color: #79c0ff;
+  border-color: var(--accent);
+  background: var(--main-pill-bg);
+  color: var(--main-pill-text);
 }
 
 .og-panel-body {
@@ -1123,15 +1152,15 @@ body.resizing-layout-horizontal {
 
 .nav-row.active {
   box-shadow: inset 2px 0 0 var(--accent);
-  background: #152033;
+  background: var(--row-selected);
 }
 
 .nav-row.focused:not(.active) {
-  background: #101722;
+  background: var(--row-hover);
 }
 
 .nav-row.active button {
-  color: #79c0ff;
+  color: var(--main-pill-text);
 }
 
 .nav-row span,
@@ -1248,21 +1277,21 @@ body.resizing-layout-horizontal {
 .branch-health-badge.current,
 .branch-health-badge.up-to-date {
   border-color: #238636;
-  background: #16351f;
-  color: #3fb950;
+  background: var(--success-bg);
+  color: var(--success-text);
 }
 
 .branch-health-badge.ahead {
-  border-color: #9e6a03;
-  background: #3d2914;
-  color: #e3b341;
+  border-color: var(--release-pill-border);
+  background: var(--release-pill-bg);
+  color: var(--warning);
 }
 
 .branch-health-badge.behind,
 .branch-health-badge.diverged {
-  border-color: #da3633;
-  background: #3d1a1a;
-  color: #ff7b72;
+  border-color: var(--wip-pill-border);
+  background: var(--wip-pill-bg);
+  color: var(--danger);
 }
 
 .branch-inspector-meta,
@@ -1314,9 +1343,9 @@ body.resizing-layout-horizontal {
   grid-template-columns: auto minmax(0, 1fr);
   gap: 7px;
   align-items: center;
-  border: 1px solid #9e6a03;
-  background: #2c2413;
-  color: #e3b341;
+  border: 1px solid var(--release-pill-border);
+  background: var(--warn-surface-strong);
+  color: var(--warning);
   padding: 8px;
 }
 
@@ -1441,9 +1470,9 @@ body.resizing-layout-horizontal {
 
 .branch-inspector-error {
   margin: 12px;
-  border: 1px solid #da3633;
-  background: #3d1a1a;
-  color: #ff7b72;
+  border: 1px solid var(--wip-pill-border);
+  background: var(--wip-pill-bg);
+  color: var(--danger);
   padding: 10px;
   font-size: 12px;
 }
@@ -1494,7 +1523,7 @@ body.resizing-layout-horizontal {
 .workflow-empty {
   margin: 0;
   border: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
   color: var(--muted);
   font-size: 11px;
   line-height: 1.4;
@@ -1507,7 +1536,7 @@ body.resizing-layout-horizontal {
   gap: 4px;
   min-width: 0;
   border: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
 }
 
 .lane-card {
@@ -1522,7 +1551,7 @@ body.resizing-layout-horizontal {
 .stack-card.active,
 .lane-card.active {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  background: #13151e;
+  background: var(--row-hover);
 }
 
 .stack-card-header {
@@ -1576,7 +1605,7 @@ body.resizing-layout-horizontal {
   width: fit-content;
   border: 1px solid var(--component-border);
   border-radius: 4px;
-  background: #161b22;
+  background: var(--panel);
   color: var(--muted);
   font-size: 8px;
   font-style: normal;
@@ -1588,23 +1617,23 @@ body.resizing-layout-horizontal {
 .workflow-status.clean,
 .workflow-status.ahead,
 .workflow-status.dirty {
-  border-color: color-mix(in srgb, #3fb950 45%, transparent);
-  background: #16351f;
-  color: #3fb950;
+  border-color: color-mix(in srgb, var(--success-text) 45%, transparent);
+  background: var(--success-bg);
+  color: var(--success-text);
 }
 
 .workflow-status.behind,
 .workflow-status.needs-restack,
 .workflow-status.blocked {
-  border-color: color-mix(in srgb, #e3b341 45%, transparent);
-  background: #3d2914;
-  color: #e3b341;
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  background: var(--release-pill-bg);
+  color: var(--warning);
 }
 
 .workflow-status.conflicted {
-  border-color: color-mix(in srgb, #ff7b72 45%, transparent);
-  background: #3d1a1a;
-  color: #ff7b72;
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: var(--wip-pill-bg);
+  color: var(--danger);
 }
 
 .stack-tree {
@@ -1626,7 +1655,7 @@ body.resizing-layout-horizontal {
 
 .stack-tree-row.trunk {
   grid-template-columns: minmax(0, 1fr) auto;
-  color: #79c0ff;
+  color: var(--main-pill-text);
 }
 
 .stack-tree-row > span {
@@ -1917,7 +1946,7 @@ body.resizing-layout-horizontal {
   overflow: auto;
   border: 1px solid var(--border-strong);
   border-radius: 4px;
-  background: #161b22;
+  background: var(--panel);
   box-shadow: 0 14px 36px rgb(0 0 0 / 48%);
   padding: 4px;
   text-transform: none;
@@ -1940,13 +1969,13 @@ body.resizing-layout-horizontal {
 
 .history-filter-menu button:hover,
 .history-filter-menu button:focus-visible {
-  background: #13151e;
+  background: var(--row-hover);
   color: var(--text);
   outline: 0;
 }
 
 .history-filter-menu button.selected {
-  background: #0d1117;
+  background: var(--panel-2);
   color: var(--accent);
 }
 
@@ -2019,11 +2048,11 @@ body.resizing-layout-horizontal {
 }
 
 .graph-commit-row:hover {
-  background: #121820;
+  background: var(--row-hover);
 }
 
 .graph-commit-row.selected {
-  background: #1a2638;
+  background: var(--row-selected);
 }
 
 .graph-commit-row.selected::before {
@@ -2048,7 +2077,7 @@ body.resizing-layout-horizontal {
 .graph-wip-row:hover {
   background:
     linear-gradient(90deg, color-mix(in srgb, var(--warning) 20%, transparent), transparent 56%),
-    #13151e;
+    var(--row-hover);
 }
 
 .branch-tag-cell {
@@ -2141,7 +2170,7 @@ body.resizing-layout-horizontal {
   border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
   border-radius: 4px;
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: #b388ff;
+  color: var(--feature-pill-text);
   font-size: 8px;
   line-height: 16px;
   padding: 0 5px;
@@ -2274,19 +2303,19 @@ body.resizing-layout-horizontal {
 }
 
 .commit-type-fix {
-  color: #ff7b72;
+  color: var(--danger);
 }
 
 .commit-type-feat {
-  color: #3fb950;
+  color: var(--success-text);
 }
 
 .commit-type-merge {
-  color: #d2a8ff;
+  color: var(--feature-pill-text);
 }
 
 .commit-scope {
-  color: #58a6ff;
+  color: var(--accent);
   font-weight: 500;
 }
 
@@ -2343,7 +2372,7 @@ body.resizing-layout-horizontal {
 }
 
 .worktree-detail-header svg {
-  color: #e3b341;
+  color: var(--warning);
 }
 
 .worktree-detail-header strong,
@@ -2361,8 +2390,8 @@ body.resizing-layout-horizontal {
 
 .worktree-detail-message {
   margin: 0;
-  border: 1px solid color-mix(in srgb, #e3b341 35%, var(--border));
-  background: #1c1a11;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+  background: var(--warn-surface);
   color: var(--body);
   font-size: 12px;
   line-height: 1.45;
@@ -2376,7 +2405,7 @@ body.resizing-layout-horizontal {
   align-items: center;
   min-height: 32px;
   border: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
   color: var(--body);
   cursor: pointer;
   font-family: var(--font-mono);
@@ -2404,7 +2433,7 @@ body.resizing-layout-horizontal {
 .stack-last-operation {
   margin: 0;
   border: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
   color: var(--muted);
   font-size: 10px;
   line-height: 1.4;
@@ -2486,7 +2515,7 @@ body.resizing-layout-horizontal {
 .commit-detail-message {
   margin: 0;
   border: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
   color: var(--body);
   font-size: 13px;
   line-height: 1.5;
@@ -2528,7 +2557,7 @@ body.resizing-layout-horizontal {
 .commit-detail-meta div {
   min-width: 0;
   border: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
   padding: 6px;
 }
 
@@ -2558,7 +2587,7 @@ body.resizing-layout-horizontal {
 .commit-parent-links button {
   border: 1px solid var(--component-border);
   border-radius: 4px;
-  background: #161b22;
+  background: var(--panel);
   color: var(--muted);
   cursor: pointer;
   font-family: var(--font-mono);
@@ -2568,8 +2597,8 @@ body.resizing-layout-horizontal {
 
 .commit-parent-links button:hover,
 .commit-parent-links button:focus-visible {
-  border-color: #58a6ff;
-  color: #79c0ff;
+  border-color: var(--accent);
+  color: var(--main-pill-text);
 }
 
 .commit-detail-note {
@@ -2653,7 +2682,7 @@ body.resizing-layout-horizontal {
 
 .conflict-file-row:hover,
 .conflict-file-row.selected {
-  background: #13151e;
+  background: var(--row-hover);
 }
 
 .conflict-file-row.selected {
@@ -2894,7 +2923,7 @@ body.resizing-layout-horizontal {
   display: grid;
   gap: 6px;
   border-bottom: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
   padding: 7px 8px;
 }
 
@@ -2924,7 +2953,7 @@ body.resizing-layout-horizontal {
 .parallel-lane-chips button {
   border: 1px solid var(--border);
   border-radius: 4px;
-  background: #161b22;
+  background: var(--panel);
   color: var(--muted);
   cursor: pointer;
   font-size: 9px;
@@ -2933,8 +2962,8 @@ body.resizing-layout-horizontal {
 
 .parallel-lane-heading button.active,
 .parallel-lane-chips button.active {
-  border-color: #58a6ff;
-  color: #79c0ff;
+  border-color: var(--accent);
+  color: var(--main-pill-text);
 }
 
 .parallel-lane-chips {
@@ -2958,7 +2987,7 @@ body.resizing-layout-horizontal {
 }
 
 .create-lane-chip {
-  color: #b388ff !important;
+  color: var(--feature-pill-text) !important;
 }
 
 .parallel-lane-detail {
@@ -3030,15 +3059,15 @@ body.resizing-layout-horizontal {
 }
 
 .change-column-header .bulk-action-button.stage-all {
-  border-color: #1f6feb;
-  background: #1a3a6b;
-  color: #79c0ff;
+  border-color: var(--main-pill-border);
+  background: var(--main-pill-bg);
+  color: var(--main-pill-text);
 }
 
 .change-column-header .bulk-action-button.unstage-all {
-  border-color: #da3633;
-  background: #3d1a1a;
-  color: #ff7b72;
+  border-color: var(--wip-pill-border);
+  background: var(--wip-pill-bg);
+  color: var(--danger);
 }
 
 .file-list {
@@ -3068,7 +3097,7 @@ body.resizing-layout-horizontal {
 .file-row:hover,
 .file-row:focus-within,
 .file-row.selected {
-  background: #13151e;
+  background: var(--row-hover);
 }
 
 .file-row > span:nth-child(2) {
@@ -3098,7 +3127,7 @@ body.resizing-layout-horizontal {
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
   border-radius: 4px;
-  color: #b388ff;
+  color: var(--feature-pill-text);
   font-size: 8px;
   font-style: normal;
   line-height: 1;
@@ -3154,13 +3183,13 @@ body.resizing-layout-horizontal {
 }
 
 .worktree-file-state.staged {
-  border-color: color-mix(in srgb, #3fb950 42%, var(--border));
-  color: #3fb950;
+  border-color: color-mix(in srgb, var(--success-text) 42%, var(--border));
+  color: var(--success-text);
 }
 
 .worktree-file-state.unstaged {
-  border-color: color-mix(in srgb, #e3b341 42%, var(--border));
-  color: #e3b341;
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+  color: var(--warning);
 }
 
 .inline-error {
@@ -3186,37 +3215,37 @@ body.resizing-layout-horizontal {
 }
 
 .status-chip.modified {
-  border-color: color-mix(in srgb, #e3b341 45%, transparent);
-  background: #3d2914;
-  color: #e3b341;
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  background: var(--release-pill-bg);
+  color: var(--warning);
 }
 
 .status-chip.added {
-  border-color: color-mix(in srgb, #3fb950 45%, transparent);
-  background: #16351f;
-  color: #3fb950;
+  border-color: color-mix(in srgb, var(--success-text) 45%, transparent);
+  background: var(--success-bg);
+  color: var(--success-text);
 }
 
 .status-chip.deleted,
 .status-chip.conflicted {
-  border-color: color-mix(in srgb, #ff7b72 45%, transparent);
-  background: #3d1a1a;
-  color: #ff7b72;
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: var(--wip-pill-bg);
+  color: var(--danger);
 }
 
 .status-chip.renamed,
 .status-chip.copied {
-  border-color: color-mix(in srgb, #58a6ff 45%, transparent);
-  background: #1a3a6b;
-  color: #58a6ff;
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--main-pill-bg);
+  color: var(--accent);
 }
 
 .status-chip.untracked,
 .status-chip.ignored,
 .status-chip.unknown {
   border-color: var(--component-border);
-  background: #161b22;
-  color: #8b949e;
+  background: var(--panel);
+  color: var(--muted);
 }
 
 .file-actions {
@@ -3267,7 +3296,7 @@ body.resizing-layout-horizontal {
 
 .commit-more-tools {
   border: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
 }
 
 .commit-more-tools summary {
@@ -3309,7 +3338,7 @@ body.resizing-layout-horizontal {
   height: 34px;
   border-color: var(--component-border);
   background: transparent;
-  color: #79c0ff;
+  color: var(--main-pill-text);
 }
 
 .commit-footer {
@@ -3321,7 +3350,7 @@ body.resizing-layout-horizontal {
   gap: 8px;
   margin: 0 -12px -12px;
   border-top: 1px solid var(--border);
-  background: #161b22;
+  background: var(--panel);
   padding: 8px;
 }
 
@@ -3333,7 +3362,7 @@ body.resizing-layout-horizontal {
 }
 
 .commit-submit-button:hover:not(:disabled) {
-  border-color: #3fb950;
+  border-color: var(--success-text);
   background: #2ea043;
 }
 
@@ -3425,7 +3454,7 @@ body.resizing-layout-horizontal {
   max-height: 146px;
   overflow: auto;
   border: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
   padding: 8px;
 }
 
@@ -3498,7 +3527,7 @@ body.resizing-layout-horizontal {
   justify-content: space-between;
   min-height: 26px;
   border-bottom: 1px solid var(--row-separator);
-  background: #0d1117;
+  background: var(--panel-2);
   color: var(--quiet);
   font-size: 9px;
   letter-spacing: 0.08em;
@@ -3530,7 +3559,7 @@ body.resizing-layout-horizontal {
 
 .undo-row:hover,
 .undo-row:focus-visible {
-  background: #13151e;
+  background: var(--row-hover);
   color: var(--text);
 }
 
@@ -3924,7 +3953,7 @@ body.resizing-layout-horizontal {
   inset: 0;
   display: grid;
   grid-template-rows: 72px 46px minmax(0, 1fr);
-  background: #0d1117;
+  background: var(--panel-2);
   color: var(--text);
   z-index: 30;
 }
@@ -3935,7 +3964,7 @@ body.resizing-layout-horizontal {
   justify-content: space-between;
   min-width: 0;
   border-bottom: 1px solid var(--border);
-  background: #161b22;
+  background: var(--panel);
   padding: 0 22px;
 }
 
@@ -4047,7 +4076,7 @@ body.resizing-layout-horizontal {
   min-width: 0;
   overflow-x: auto;
   border-bottom: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
   padding: 6px 22px;
   scrollbar-width: thin;
 }
@@ -4074,14 +4103,14 @@ body.resizing-layout-horizontal {
 
 .preference-tab.active {
   border-color: color-mix(in srgb, var(--accent) 48%, transparent);
-  background: #1a3a6b;
-  color: #79c0ff;
+  background: var(--main-pill-bg);
+  color: var(--main-pill-text);
 }
 
 .preference-tab:hover,
 .preference-tab:focus-visible {
   border-color: var(--border-strong);
-  background: #13151e;
+  background: var(--row-hover);
   color: var(--text);
   outline: 0;
 }
@@ -4244,7 +4273,7 @@ body.resizing-layout-horizontal {
 }
 
 .profile-row.active {
-  border-left: 2px solid #58a6ff;
+  border-left: 2px solid var(--accent);
   background: var(--panel-3);
 }
 
@@ -4321,7 +4350,7 @@ body.resizing-layout-horizontal {
   width: 13px;
   height: 13px;
   border-radius: 50%;
-  background: #58a6ff;
+  background: var(--accent);
   color: #0d1117;
 }
 
@@ -4405,7 +4434,7 @@ body.resizing-layout-horizontal {
   align-items: center;
   min-height: 44px;
   border: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
   color: var(--muted);
   cursor: pointer;
   padding: 0 12px;
@@ -4415,8 +4444,8 @@ body.resizing-layout-horizontal {
 .integration-list button.active,
 .integration-list button:hover {
   border-color: color-mix(in srgb, var(--accent) 46%, var(--border));
-  background: #1a3a6b;
-  color: #79c0ff;
+  background: var(--main-pill-bg);
+  color: var(--main-pill-text);
 }
 
 .integration-detail {
@@ -4425,7 +4454,7 @@ body.resizing-layout-horizontal {
   gap: 14px;
   min-width: 0;
   border: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
   padding: 26px;
 }
 
@@ -4478,7 +4507,7 @@ body.resizing-layout-horizontal {
   inset: 0;
   display: grid;
   grid-template-rows: 72px 46px 46px minmax(0, 1fr);
-  background: #0d1117;
+  background: var(--panel-2);
   color: var(--text);
   z-index: 32;
 }
@@ -4489,7 +4518,7 @@ body.resizing-layout-horizontal {
   justify-content: space-between;
   min-width: 0;
   border-bottom: 1px solid var(--border);
-  background: #161b22;
+  background: var(--panel);
   padding: 0 22px;
 }
 
@@ -4535,7 +4564,7 @@ body.resizing-layout-horizontal {
 .repo-management-toolbar {
   gap: 8px;
   border-bottom: 1px solid var(--border);
-  background: #0d1117;
+  background: var(--panel-2);
   padding: 6px 22px;
 }
 
@@ -4612,7 +4641,7 @@ body.resizing-layout-horizontal {
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  background: #0d1117;
+  background: var(--panel-2);
 }
 
 .repo-management-table {
@@ -4634,7 +4663,7 @@ body.resizing-layout-horizontal {
   z-index: 1;
   height: 32px;
   border: 1px solid var(--border);
-  background: #161b22;
+  background: var(--panel);
   color: var(--muted);
   font-size: 9px;
   font-weight: 750;
@@ -4661,7 +4690,7 @@ body.resizing-layout-horizontal {
   align-items: center;
   height: 34px;
   border-bottom: 1px solid var(--border);
-  background: #1b2233;
+  background: var(--row-selected);
   color: var(--muted);
   padding: 0 10px;
 }
