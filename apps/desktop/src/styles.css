@@ -212,7 +212,21 @@ textarea:focus-visible {
 }
 
 :root[data-theme="light"] .repo-tabbar {
-  background: #ece8dd;
+  background: #e3ded1;
+}
+
+/* Light mode inverts the dark layering: quiet tabs on the darker strip, and
+   the active tab pops to match the page background instead of receding. */
+:root[data-theme="light"] .repo-tab {
+  background: transparent;
+}
+
+:root[data-theme="light"] .repo-tab.active {
+  background: var(--bg);
+}
+
+:root[data-theme="light"] .topbar {
+  background: var(--bg);
 }
 
 .repo-tabbar-actions {
@@ -417,11 +431,18 @@ textarea:focus-visible {
   min-width: 0;
   height: 58px;
   border: 1px solid var(--border);
+  border-radius: 6px;
   background: var(--panel);
   color: var(--text);
   cursor: pointer;
   padding: 5px 8px 5px 10px;
   text-align: left;
+}
+
+:root[data-theme="light"] .repo-identity-card {
+  background: #ffffff;
+  border-color: var(--border-strong);
+  box-shadow: 0 1px 2px var(--shadow);
 }
 
 .repo-identity-card:hover,
