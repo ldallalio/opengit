@@ -20,6 +20,11 @@ const OPENAI_KEY_SERVICE: &str = "OpenGit";
 const OPENAI_KEY_ACCOUNT: &str = "openai-api-key";
 const AZURE_DEVOPS_PAT_ACCOUNT: &str = "azure-devops-pat";
 const GITHUB_PAT_ACCOUNT: &str = "github-pat";
+const CLAUDE_KEY_ACCOUNT: &str = "claude-api-key";
+const CLAUDE_MODEL: &str = "claude-opus-4-8";
+const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_COUNT_TOKENS_URL: &str = "https://api.anthropic.com/v1/messages/count_tokens";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITHUB_USER_AGENT: &str = "OpenGit";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5-mini";
@@ -600,6 +605,20 @@ struct OpenAiStatus {
 #[serde(rename_all = "camelCase")]
 struct AzureDevOpsStatus {
     configured: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeStatus {
+    configured: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeTestResult {
+    configured: bool,
+    ok: bool,
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1484,6 +1503,97 @@ async fn ai_openai_clear_api_key() -> CommandResult<OpenAiStatus> {
 }
 
 #[tauri::command]
+async fn ai_claude_status() -> CommandResult<ClaudeStatus> {
+    Ok(ClaudeStatus {
+        configured: read_claude_api_key()?.is_some(),
+    })
+}
+
+#[tauri::command]
+async fn ai_claude_test_api_key() -> CommandResult<ClaudeTestResult> {
+    let Some(api_key) = read_claude_api_key()? else {
+        return Ok(ClaudeTestResult {
+            configured: false,
+            ok: false,
+            message: "No Claude API key is saved.".to_string(),
+        });
+    };
+
+    // count_tokens is free and fast; 401 means the key is bad.
+    let response = reqwest::Client::new()
+        .post(ANTHROPIC_COUNT_TOKENS_URL)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .json(&json!({
+            "model": CLAUDE_MODEL,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await;
+
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_default();
+            if status.is_success() {
+                Ok(ClaudeTestResult {
+                    configured: true,
+                    ok: true,
+                    message: "Claude API key is saved and reachable.".to_string(),
+                })
+            } else {
+                Ok(ClaudeTestResult {
+                    configured: true,
+                    ok: false,
+                    message: format!(
+                        "Anthropic returned HTTP {status}: {}",
+                        claude_error_message(&body_text)
+                    ),
+                })
+            }
+        }
+        Err(error) => Ok(ClaudeTestResult {
+            configured: true,
+            ok: false,
+            message: format!("Could not reach Anthropic: {error}"),
+        }),
+    }
+}
+
+#[tauri::command]
+async fn ai_claude_save_api_key(api_key: String) -> CommandResult<ClaudeStatus> {
+    let value = api_key.trim();
+    if value.is_empty() {
+        return invalid("INVALID_CLAUDE_KEY", "Claude API key is required.");
+    }
+    if value.chars().any(|ch| ch.is_control()) {
+        return invalid(
+            "INVALID_CLAUDE_KEY",
+            "Claude API key contains unsafe characters.",
+        );
+    }
+
+    let entry = claude_key_entry()?;
+    entry.set_password(value).map_err(map_keyring_error)?;
+    if read_claude_api_key()?.as_deref() != Some(value) {
+        return invalid(
+            "CLAUDE_KEY_VERIFY_FAILED",
+            "Claude API key was saved but could not be read through the normal status path.",
+        );
+    }
+    Ok(ClaudeStatus { configured: true })
+}
+
+#[tauri::command]
+async fn ai_claude_clear_api_key() -> CommandResult<ClaudeStatus> {
+    let entry = claude_key_entry()?;
+    match entry.delete_credential() {
+        Ok(_) | Err(KeyringError::NoEntry) => Ok(ClaudeStatus { configured: false }),
+        Err(error) => Err(map_keyring_error(error)),
+    }
+}
+
+#[tauri::command]
 async fn azure_devops_status() -> CommandResult<AzureDevOpsStatus> {
     Ok(AzureDevOpsStatus {
         configured: read_azure_devops_pat()?.is_some(),
@@ -1616,50 +1726,20 @@ async fn provider_repos_list(request: ProviderReposListRequest) -> CommandResult
 async fn ai_commit_message_generate(
     repo_path: String,
     model: Option<String>,
+    provider: Option<String>,
 ) -> CommandResult<AiCommitSuggestion> {
     let repo = resolve_repo_root(&repo_path).await?;
-    let api_key = read_openai_api_key()?.ok_or_else(|| AppError::InvalidInput {
-        code: "OPENAI_KEY_MISSING",
-        message:
-            "Add an OpenAI API key in Preferences > Integrations before generating commit messages."
-                .to_string(),
-    })?;
-    let model = validate_openai_model(model)?;
+    let backend = resolve_ai_backend(provider, model)?;
     let staged_context = build_staged_commit_context(&repo).await?;
+    let output = request_ai_output_text(
+        &backend,
+        "You write concise Git commit messages from staged diffs. Return only JSON with keys summary and description. summary must be one line, preferably Conventional Commits style. description should be a short markdown body with 1-4 bullets when useful. Do not invent files or behavior not shown in the staged diff.",
+        staged_context,
+        1200,
+    )
+    .await?;
 
-    let response = reqwest::Client::new()
-        .post("https://api.openai.com/v1/responses")
-        .bearer_auth(api_key)
-        .json(&json!({
-            "model": model,
-            "instructions": "You write concise Git commit messages from staged diffs. Return only JSON with keys summary and description. summary must be one line, preferably Conventional Commits style. description should be a short markdown body with 1-4 bullets when useful. Do not invent files or behavior not shown in the staged diff.",
-            "input": staged_context,
-            "reasoning": {
-                "effort": "minimal"
-            },
-            "max_output_tokens": 1200
-        }))
-        .send()
-        .await
-        .map_err(|error| AppError::AiFailed {
-            message: "Could not reach OpenAI.".to_string(),
-            detail: error.to_string(),
-        })?;
-
-    let status = response.status();
-    let body_text = response.text().await.map_err(|error| AppError::AiFailed {
-        message: "Could not read OpenAI response.".to_string(),
-        detail: error.to_string(),
-    })?;
-
-    if !status.is_success() {
-        return Err(AppError::AiFailed {
-            message: format!("OpenAI returned HTTP {status}."),
-            detail: body_text,
-        });
-    }
-
-    parse_openai_commit_response(&body_text)
+    parse_commit_suggestion_text(&output)
 }
 
 #[tauri::command]
@@ -1692,25 +1772,20 @@ async fn ai_branch_name_generate(
 async fn ai_pr_description_generate(
     repo_path: String,
     model: Option<String>,
+    provider: Option<String>,
 ) -> CommandResult<AiPrDescriptionSuggestion> {
     let repo = resolve_repo_root(&repo_path).await?;
-    let api_key = read_openai_api_key()?.ok_or_else(|| AppError::InvalidInput {
-        code: "OPENAI_KEY_MISSING",
-        message: "Add an OpenAI API key in Preferences > Integrations before generating PR text."
-            .to_string(),
-    })?;
-    let model = validate_openai_model(model)?;
+    let backend = resolve_ai_backend(provider, model)?;
     let context = build_pr_context(&repo).await?;
-    let body_text = request_openai_response_body(
-        &api_key,
-        &model,
+    let output = request_ai_output_text(
+        &backend,
         "You draft practical pull request copy from Git history and diffs. Return only JSON with keys title and description. title must be concise. description must use markdown with a short Summary section and a Testing section. Do not invent product behavior, tickets, reviewers, or test results not shown in the context.",
         context,
         1400,
     )
     .await?;
 
-    parse_openai_pr_response(&body_text)
+    parse_pr_suggestion_text(&output)
 }
 
 #[tauri::command]
@@ -1718,36 +1793,20 @@ async fn ai_branch_explain(
     repo_path: String,
     branch: String,
     model: Option<String>,
+    provider: Option<String>,
 ) -> CommandResult<AiBranchExplanation> {
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&branch, "branch name")?;
-    let api_key = read_openai_api_key()?.ok_or_else(|| AppError::InvalidInput {
-        code: "OPENAI_KEY_MISSING",
-        message:
-            "Add an OpenAI API key in Preferences > Integrations before explaining branch changes."
-                .to_string(),
-    })?;
-    let model = validate_openai_model(model)?;
+    let backend = resolve_ai_backend(provider, model)?;
     let (base, context) = build_branch_explain_context(&repo, &branch).await?;
-    let body_text = request_openai_response_body(
-        &api_key,
-        &model,
+    let output = request_ai_output_text(
+        &backend,
         "You explain Git branch changes to a developer reviewing the branch. Return only markdown, no JSON and no code fences around the whole answer. Start with a one-paragraph summary of what the branch does, then a short bulleted list of the notable changes grouped by area. Keep it concise. Do not invent behavior, files, or intent not shown in the Git context.",
         context,
         1400,
     )
     .await?;
-
-    let body: OpenAiResponseBody =
-        serde_json::from_str(&body_text).map_err(|error| AppError::AiFailed {
-            message: "OpenAI returned an unreadable response.".to_string(),
-            detail: error.to_string(),
-        })?;
-    let markdown = extract_openai_output_text(&body).ok_or_else(|| AppError::AiFailed {
-        message: openai_missing_output_message(&body),
-        detail: truncate_display_text(&redact_secrets(&body_text), 2_000),
-    })?;
-    let markdown = markdown.trim().to_string();
+    let markdown = output.trim().to_string();
     if markdown.is_empty() {
         return Err(AppError::AiFailed {
             message: "OpenAI did not return an explanation.".to_string(),
@@ -5384,6 +5443,18 @@ fn read_azure_devops_pat() -> CommandResult<Option<String>> {
     }
 }
 
+fn claude_key_entry() -> CommandResult<Entry> {
+    Entry::new(OPENAI_KEY_SERVICE, CLAUDE_KEY_ACCOUNT).map_err(map_keyring_error)
+}
+
+fn read_claude_api_key() -> CommandResult<Option<String>> {
+    match claude_key_entry()?.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(error) => Err(map_keyring_error(error)),
+    }
+}
+
 fn github_pat_entry() -> CommandResult<Entry> {
     Entry::new(OPENAI_KEY_SERVICE, GITHUB_PAT_ACCOUNT).map_err(map_keyring_error)
 }
@@ -6449,6 +6520,178 @@ fn openai_error_message(body_text: &str) -> String {
     }
 }
 
+enum AiBackend {
+    OpenAi { api_key: String, model: String },
+    Claude { api_key: String },
+}
+
+/// Pick the AI provider for a generation request: an explicit preference must
+/// have its key saved; "auto" uses whichever key exists, Claude winning ties.
+fn resolve_ai_backend(provider: Option<String>, model: Option<String>) -> CommandResult<AiBackend> {
+    let preference = provider
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "auto".to_string());
+    let openai_key = read_openai_api_key()?;
+    let claude_key = read_claude_api_key()?;
+
+    match preference.as_str() {
+        "openai" => match openai_key {
+            Some(api_key) => Ok(AiBackend::OpenAi {
+                api_key,
+                model: validate_openai_model(model)?,
+            }),
+            None => Err(AppError::InvalidInput {
+                code: "OPENAI_KEY_MISSING",
+                message: "Add an OpenAI API key in Preferences > Integrations or switch the AI provider.".to_string(),
+            }),
+        },
+        "claude" => match claude_key {
+            Some(api_key) => Ok(AiBackend::Claude { api_key }),
+            None => Err(AppError::InvalidInput {
+                code: "CLAUDE_KEY_MISSING",
+                message: "Add a Claude API key in Preferences > Integrations or switch the AI provider.".to_string(),
+            }),
+        },
+        "auto" => {
+            if let Some(api_key) = claude_key {
+                Ok(AiBackend::Claude { api_key })
+            } else if let Some(api_key) = openai_key {
+                Ok(AiBackend::OpenAi {
+                    api_key,
+                    model: validate_openai_model(model)?,
+                })
+            } else {
+                Err(AppError::InvalidInput {
+                    code: "AI_KEY_MISSING",
+                    message: "Add an OpenAI or Claude API key in Preferences > Integrations before using AI features.".to_string(),
+                })
+            }
+        }
+        _ => invalid("INVALID_AI_PROVIDER", "AI provider must be auto, openai, or claude."),
+    }
+}
+
+/// Run one instructions+input generation on the selected provider and return
+/// the model's raw text output. Prompt content is identical across providers.
+async fn request_ai_output_text(
+    backend: &AiBackend,
+    instructions: &str,
+    input: String,
+    max_output_tokens: u32,
+) -> CommandResult<String> {
+    match backend {
+        AiBackend::OpenAi { api_key, model } => {
+            let body_text =
+                request_openai_response_body(api_key, model, instructions, input, max_output_tokens)
+                    .await?;
+            openai_output_text(&body_text)
+        }
+        AiBackend::Claude { api_key } => {
+            request_claude_output_text(api_key, instructions, input).await
+        }
+    }
+}
+
+fn openai_output_text(body_text: &str) -> CommandResult<String> {
+    let body: OpenAiResponseBody =
+        serde_json::from_str(body_text).map_err(|error| AppError::AiFailed {
+            message: "OpenAI returned an unreadable response.".to_string(),
+            detail: error.to_string(),
+        })?;
+    extract_openai_output_text(&body).ok_or_else(|| AppError::AiFailed {
+        message: openai_missing_output_message(&body),
+        detail: truncate_display_text(&redact_secrets(body_text), 2_000),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeMessageResponse {
+    content: Vec<serde_json::Value>,
+}
+
+async fn request_claude_output_text(
+    api_key: &str,
+    instructions: &str,
+    input: String,
+) -> CommandResult<String> {
+    let response = reqwest::Client::new()
+        .post(ANTHROPIC_MESSAGES_URL)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .json(&json!({
+            "model": CLAUDE_MODEL,
+            "max_tokens": 16000,
+            "system": instructions,
+            "messages": [{"role": "user", "content": input}]
+        }))
+        .send()
+        .await
+        .map_err(|error| AppError::AiFailed {
+            message: "Could not reach Anthropic.".to_string(),
+            detail: error.to_string(),
+        })?;
+
+    let status = response.status();
+    let body_text = response.text().await.map_err(|error| AppError::AiFailed {
+        message: "Could not read Anthropic response.".to_string(),
+        detail: error.to_string(),
+    })?;
+
+    if !status.is_success() {
+        return Err(AppError::AiFailed {
+            message: format!(
+                "Anthropic returned HTTP {status}: {}",
+                claude_error_message(&body_text)
+            ),
+            detail: truncate_display_text(&redact_secrets(&body_text), 2_000),
+        });
+    }
+
+    let body: ClaudeMessageResponse =
+        serde_json::from_str(&body_text).map_err(|error| AppError::AiFailed {
+            message: "Anthropic returned an unreadable response.".to_string(),
+            detail: error.to_string(),
+        })?;
+
+    // Content is a list of typed blocks; collect every text block rather than
+    // assuming the first block is text.
+    let output: String = body
+        .content
+        .iter()
+        .filter(|block| block.get("type").and_then(|value| value.as_str()) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(|value| value.as_str()))
+        .collect::<Vec<_>>()
+        .join("");
+    if output.trim().is_empty() {
+        return Err(AppError::AiFailed {
+            message: "Claude did not return any text output.".to_string(),
+            detail: truncate_display_text(&redact_secrets(&body_text), 2_000),
+        });
+    }
+    Ok(output)
+}
+
+fn claude_error_message(body_text: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body_text) {
+        if let Some(message) = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(|message| message.as_str())
+            .filter(|message| !message.trim().is_empty())
+        {
+            return truncate_display_text(&redact_secrets(message), 300);
+        }
+    }
+
+    let fallback = body_text.trim();
+    if fallback.is_empty() {
+        "Request failed.".to_string()
+    } else {
+        truncate_display_text(&redact_secrets(fallback), 300)
+    }
+}
+
 async fn request_openai_response_body(
     api_key: &str,
     model: &str,
@@ -6897,46 +7140,18 @@ fn truncate_display_text(value: &str, max_chars: usize) -> String {
     text
 }
 
+#[cfg(test)]
 fn parse_openai_commit_response(body_text: &str) -> CommandResult<AiCommitSuggestion> {
-    let body: OpenAiResponseBody =
-        serde_json::from_str(body_text).map_err(|error| AppError::AiFailed {
-            message: "OpenAI returned an unreadable response.".to_string(),
-            detail: error.to_string(),
-        })?;
-    let output = extract_openai_output_text(&body).ok_or_else(|| AppError::AiFailed {
-        message: openai_missing_output_message(&body),
-        detail: truncate_display_text(&redact_secrets(body_text), 2_000),
-    })?;
-
-    parse_commit_suggestion_text(&output)
+    parse_commit_suggestion_text(&openai_output_text(body_text)?)
 }
 
 fn parse_openai_branch_response(body_text: &str) -> CommandResult<AiBranchNameSuggestion> {
-    let body: OpenAiResponseBody =
-        serde_json::from_str(body_text).map_err(|error| AppError::AiFailed {
-            message: "OpenAI returned an unreadable response.".to_string(),
-            detail: error.to_string(),
-        })?;
-    let output = extract_openai_output_text(&body).ok_or_else(|| AppError::AiFailed {
-        message: openai_missing_output_message(&body),
-        detail: truncate_display_text(&redact_secrets(body_text), 2_000),
-    })?;
-
-    parse_branch_suggestion_text(&output)
+    parse_branch_suggestion_text(&openai_output_text(body_text)?)
 }
 
+#[cfg(test)]
 fn parse_openai_pr_response(body_text: &str) -> CommandResult<AiPrDescriptionSuggestion> {
-    let body: OpenAiResponseBody =
-        serde_json::from_str(body_text).map_err(|error| AppError::AiFailed {
-            message: "OpenAI returned an unreadable response.".to_string(),
-            detail: error.to_string(),
-        })?;
-    let output = extract_openai_output_text(&body).ok_or_else(|| AppError::AiFailed {
-        message: openai_missing_output_message(&body),
-        detail: truncate_display_text(&redact_secrets(body_text), 2_000),
-    })?;
-
-    parse_pr_suggestion_text(&output)
+    parse_pr_suggestion_text(&openai_output_text(body_text)?)
 }
 
 fn extract_openai_output_text(body: &OpenAiResponseBody) -> Option<String> {
@@ -7300,6 +7515,10 @@ pub fn run() {
             ai_openai_test_api_key,
             ai_openai_save_api_key,
             ai_openai_clear_api_key,
+            ai_claude_status,
+            ai_claude_test_api_key,
+            ai_claude_save_api_key,
+            ai_claude_clear_api_key,
             azure_devops_status,
             azure_devops_save_pat,
             azure_devops_clear_pat,
