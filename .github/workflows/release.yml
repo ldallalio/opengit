@@ -77,9 +77,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: OpenGit ${{ github.ref_name }}
           releaseBody: |
-            Beta release build.
-
-            Artifacts are updater-signed by Tauri. macOS bundles are code-signed and notarized when signing secrets are configured; Windows binaries are currently unsigned.
+            Official OpenGit release. Artifacts are updater-signed by Tauri. macOS bundles are code-signed and notarized when signing secrets are configured; Windows binaries are currently unsigned.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
@@ -110,3 +108,22 @@ jobs:
             xcrun stapler staple "${dmg}"
             gh release upload "${{ github.ref_name }}" "${dmg}" --clobber
           done
+
+  publish:
+    name: Publish release
+    needs: tauri
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish draft and mark as latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --draft=false \
+            --prerelease=false
+          release_id=$(gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" -q .id)
+          gh api -X PATCH "repos/${{ github.repository }}/releases/${release_id}" -f make_latest=true
