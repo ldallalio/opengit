@@ -4963,3 +4963,21 @@ input[type="checkbox"]:focus-visible {
       min(var(--detail-track, 300px), 25vw);
   }
 }
+
+.branch-explain-dialog {
+  width: min(640px, calc(100vw - 40px));
+}
+
+.branch-explain-markdown {
+  margin: 0 0 12px;
+  padding: 12px;
+  max-height: 50vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel-inset, rgba(0, 0, 0, 0.15));
+}
