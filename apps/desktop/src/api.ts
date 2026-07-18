@@ -11,6 +11,28 @@ export type AzureDevOpsStatus = {
   configured: boolean;
 };
 
+export type GitHubStatus = {
+  configured: boolean;
+  login?: string | null;
+  name?: string | null;
+};
+
+export type ClaudeStatus = {
+  configured: boolean;
+};
+
+export type ClaudeTestResult = {
+  configured: boolean;
+  ok: boolean;
+  message: string;
+};
+
+export type AiBranchExplanation = {
+  branch: string;
+  base: string;
+  markdown: string;
+};
+
 export type OpenAiTestResult = {
   configured: boolean;
   ok: boolean;
@@ -196,6 +218,32 @@ export const saveAzureDevOpsPat = (pat: string) => call<AzureDevOpsStatus>("azur
 
 export const clearAzureDevOpsPat = () => call<AzureDevOpsStatus>("azure_devops_clear_pat", {}, { configured: false });
 
+export const getGitHubStatus = () => call<GitHubStatus>("github_status", {}, { configured: false });
+
+export const saveGitHubPat = (pat: string) => call<GitHubStatus>("github_save_pat", { pat }, { configured: false });
+
+export const clearGitHubPat = () => call<GitHubStatus>("github_clear_pat", {}, { configured: false });
+
+export const getClaudeStatus = () => call<ClaudeStatus>("ai_claude_status", {}, { configured: false });
+
+export const saveClaudeApiKey = (apiKey: string) => call<ClaudeStatus>("ai_claude_save_api_key", { apiKey }, { configured: false });
+
+export const clearClaudeApiKey = () => call<ClaudeStatus>("ai_claude_clear_api_key", {}, { configured: false });
+
+export const testClaudeApiKey = () =>
+  call<ClaudeTestResult>("ai_claude_test_api_key", {}, { configured: false, ok: false, message: "Desktop mode is required to test secure Claude keys." });
+
+export const explainBranchChanges = (repoPath: string, branch: string, model?: string, provider?: AiProvider) =>
+  call<AiBranchExplanation>(
+    "ai_branch_explain",
+    { repoPath, branch, model, provider },
+    {
+      branch,
+      base: "origin/main",
+      markdown: "Browser preview cannot explain branches. Desktop mode sends the branch log and diff stat to the configured AI provider."
+    }
+  );
+
 export const getProviderAccountsStatus = () =>
   call<ProviderAccountStatus[]>("provider_accounts_status", {}, [
     {
@@ -210,10 +258,12 @@ export const getProviderAccountsStatus = () =>
 export const listProviderRepositories = (provider: GitProvider, localPaths: string[]) =>
   call<ProviderRepoCatalog>("provider_repos_list", { request: { provider, localPaths } }, demoProviderCatalog);
 
-export const generateAiCommitMessage = (repoPath: string, model?: string) =>
+export type AiProvider = "auto" | "openai" | "claude";
+
+export const generateAiCommitMessage = (repoPath: string, model?: string, provider?: AiProvider) =>
   call<AiCommitSuggestion>(
     "ai_commit_message_generate",
-    { repoPath, model },
+    { repoPath, model, provider },
     {
       summary: "feat: summarize staged OpenGit changes",
       description: "Generated preview based on staged files. Desktop mode sends the staged diff to OpenAI."
@@ -227,10 +277,10 @@ export const generateAiBranchName = (repoPath: string, model?: string) =>
     { name: "feature/generated-branch-name" }
   );
 
-export const generateAiPrDescription = (repoPath: string, model?: string) =>
+export const generateAiPrDescription = (repoPath: string, model?: string, provider?: AiProvider) =>
   call<AiPrDescriptionSuggestion>(
     "ai_pr_description_generate",
-    { repoPath, model },
+    { repoPath, model, provider },
     {
       title: "Improve OpenGit workflow",
       description: "## Summary\n- Generated preview for browser mode\n\n## Testing\n- Not run in browser preview"

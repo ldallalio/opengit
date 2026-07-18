@@ -32,6 +32,7 @@ import {
   Activity,
   Bug,
   ArrowDownToLine,
+  Bot,
   Boxes,
   Check,
   ChevronDown,
@@ -46,6 +47,7 @@ import {
   GitBranch,
   GitCommitHorizontal,
   GitFork,
+  Github,
   GitPullRequest,
   History,
   HardDrive,
@@ -99,6 +101,12 @@ import {
   discardPaths,
   fetchRepo,
   clearAzureDevOpsPat,
+  clearClaudeApiKey,
+  clearGitHubPat,
+  explainBranchChanges,
+  saveClaudeApiKey,
+  saveGitHubPat,
+  testClaudeApiKey,
   choosePatchSavePath,
   deleteWorkingFile,
   exportFilePatch,
@@ -299,6 +307,14 @@ type ConfirmRequest = {
   title?: string;
   confirmLabel?: string;
 };
+type AiProviderPreference = "auto" | "openai" | "claude";
+type BranchExplainState = {
+  branch: string;
+  loading: boolean;
+  base?: string;
+  markdown?: string;
+  error?: string;
+};
 type BranchMenuAction =
   | "pull"
   | "push"
@@ -373,6 +389,10 @@ const cloneRootStorageKey = "opengit:defaultCloneRoot";
 const providerLocatedPathsStorageKey = "opengit:providerLocatedPaths";
 const openAiConfiguredStorageKey = "opengit:openaiConfigured";
 const azureDevOpsConfiguredStorageKey = "opengit:azureDevOpsConfigured";
+const githubConfiguredStorageKey = "opengit:githubConfigured";
+const githubLoginStorageKey = "opengit:githubLogin";
+const claudeConfiguredStorageKey = "opengit:claudeConfigured";
+const aiProviderStorageKey = "opengit:aiProvider";
 const defaultHistoryFilters: HistoryFilters = {
   query: "",
   author: "",
@@ -616,6 +636,11 @@ function loadStoredCredentialFlag(key: string) {
   return localStorage.getItem(key) === "true";
 }
 
+function loadAiProviderPreference(): AiProviderPreference {
+  const value = localStorage.getItem(aiProviderStorageKey);
+  return value === "openai" || value === "claude" ? value : "auto";
+}
+
 function azureProviderStatus(configured: boolean): ProviderAccountStatus {
   return {
     provider: "azure-devops",
@@ -626,6 +651,88 @@ function azureProviderStatus(configured: boolean): ProviderAccountStatus {
       ? "Saved-token state is remembered locally. The keychain is checked only when you use Azure DevOps."
       : "OpenGit will check the keychain only when you save a PAT or refresh repositories."
   };
+}
+
+function githubProviderStatus(configured: boolean): ProviderAccountStatus {
+  return {
+    provider: "github",
+    configured,
+    status: configured ? "connected" : "unavailable",
+    label: "GitHub",
+    detail: configured
+      ? "Saved-token state is remembered locally. The keychain is checked only when you use GitHub."
+      : "OpenGit will check the keychain only when you save a PAT or refresh repositories."
+  };
+}
+
+type ProviderWebInfo = {
+  provider: GitProvider;
+  webUrl: string;
+};
+
+/**
+ * Derive the provider web URL for a repository from its origin remote so
+ * browser links work without any provider API call.
+ */
+function providerWebInfo(snapshot: RepoSnapshot | null): ProviderWebInfo | null {
+  const remote = snapshot?.remotes.find((item) => item.name === "origin") ?? snapshot?.remotes[0];
+  const url = remote?.fetchUrl ?? remote?.pushUrl;
+  if (!url) return null;
+
+  const trimmed = url.trim().replace(/\.git$/i, "");
+  const scpLike = trimmed.match(/^(?:[^@\s]+@)?([^:/\s]+):(.+)$/);
+  const parsed = (() => {
+    try {
+      return new URL(trimmed.replace(/^(https?:\/\/)[^/@\s]+@/i, "$1"));
+    } catch {
+      return null;
+    }
+  })();
+  const host = (parsed?.hostname ?? scpLike?.[1] ?? "").toLowerCase().replace(/^ssh\./, "");
+  const parts = (parsed?.pathname ?? scpLike?.[2] ?? "")
+    .split("/")
+    .map((part) => decodeURIComponent(part).trim())
+    .filter(Boolean);
+
+  if (host === "github.com" && parts.length >= 2) {
+    return { provider: "github", webUrl: `https://github.com/${parts[0]}/${parts[1]}` };
+  }
+  if (host === "dev.azure.com") {
+    // https clone: org/project/_git/repo — ssh clone (v3): v3/org/project/repo
+    if (parts.length >= 4 && parts[2].toLowerCase() === "_git") {
+      return { provider: "azure-devops", webUrl: `https://dev.azure.com/${parts[0]}/${parts[1]}/_git/${parts[3]}` };
+    }
+    if (parts.length >= 4 && parts[0].toLowerCase() === "v3") {
+      return { provider: "azure-devops", webUrl: `https://dev.azure.com/${parts[1]}/${parts[2]}/_git/${parts[3]}` };
+    }
+  }
+  if (host.endsWith(".visualstudio.com") && parts.length >= 3 && parts[1].toLowerCase() === "_git") {
+    const org = host.slice(0, -".visualstudio.com".length);
+    return { provider: "azure-devops", webUrl: `https://dev.azure.com/${org}/${parts[0]}/_git/${parts[2]}` };
+  }
+  return null;
+}
+
+function stripRemotePrefix(target: BranchMenuTarget) {
+  if (!target.isRemote) return target.name;
+  const index = target.name.indexOf("/");
+  return index > 0 ? target.name.slice(index + 1) : target.name;
+}
+
+function providerBranchUrl(info: ProviderWebInfo, branch: string) {
+  return info.provider === "github"
+    ? `${info.webUrl}/tree/${encodeURIComponent(branch)}`
+    : `${info.webUrl}?version=GB${encodeURIComponent(branch)}`;
+}
+
+function providerCommitUrl(info: ProviderWebInfo, sha: string) {
+  return `${info.webUrl}/commit/${sha}`;
+}
+
+function providerPrCreateUrl(info: ProviderWebInfo, branch: string) {
+  return info.provider === "github"
+    ? `${info.webUrl}/compare/${encodeURIComponent(branch)}?expand=1`
+    : `${info.webUrl}/pullrequestcreate?sourceRef=${encodeURIComponent(branch)}`;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -665,9 +772,17 @@ export default function App() {
   const [openAiConfigured, setOpenAiConfigured] = useState(() => loadStoredCredentialFlag(openAiConfiguredStorageKey));
   const [openAiModel, setOpenAiModel] = useState(localStorage.getItem("opengit:openaiModel") ?? "gpt-5-mini");
   const [azureDevOpsConfigured, setAzureDevOpsConfigured] = useState(() => loadStoredCredentialFlag(azureDevOpsConfiguredStorageKey));
+  const [githubConfigured, setGithubConfigured] = useState(() => loadStoredCredentialFlag(githubConfiguredStorageKey));
+  const [githubLogin, setGithubLogin] = useState<string | null>(() => localStorage.getItem(githubLoginStorageKey));
+  const [claudeConfigured, setClaudeConfigured] = useState(() => loadStoredCredentialFlag(claudeConfiguredStorageKey));
+  const [aiProvider, setAiProvider] = useState<AiProviderPreference>(() => loadAiProviderPreference());
   const [preferredIntegration, setPreferredIntegration] = useState("OpenAI");
   const [repositoryManagementOpen, setRepositoryManagementOpen] = useState(false);
-  const [providerAccounts, setProviderAccounts] = useState<ProviderAccountStatus[]>(() => [azureProviderStatus(loadStoredCredentialFlag(azureDevOpsConfiguredStorageKey))]);
+  const [providerAccounts, setProviderAccounts] = useState<ProviderAccountStatus[]>(() => [
+    azureProviderStatus(loadStoredCredentialFlag(azureDevOpsConfiguredStorageKey)),
+    githubProviderStatus(loadStoredCredentialFlag(githubConfiguredStorageKey))
+  ]);
+  const [branchExplain, setBranchExplain] = useState<BranchExplainState | null>(null);
   const [providerCatalog, setProviderCatalog] = useState<ProviderRepoCatalog | null>(runningInTauri ? null : null);
   const [providerLoading, setProviderLoading] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
@@ -849,8 +964,25 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem(azureDevOpsConfiguredStorageKey, String(azureDevOpsConfigured));
-    setProviderAccounts([azureProviderStatus(azureDevOpsConfigured)]);
-  }, [azureDevOpsConfigured]);
+    localStorage.setItem(githubConfiguredStorageKey, String(githubConfigured));
+    setProviderAccounts([azureProviderStatus(azureDevOpsConfigured), githubProviderStatus(githubConfigured)]);
+  }, [azureDevOpsConfigured, githubConfigured]);
+
+  useEffect(() => {
+    if (githubLogin) {
+      localStorage.setItem(githubLoginStorageKey, githubLogin);
+    } else {
+      localStorage.removeItem(githubLoginStorageKey);
+    }
+  }, [githubLogin]);
+
+  useEffect(() => {
+    localStorage.setItem(claudeConfiguredStorageKey, String(claudeConfigured));
+  }, [claudeConfigured]);
+
+  useEffect(() => {
+    localStorage.setItem(aiProviderStorageKey, aiProvider);
+  }, [aiProvider]);
 
   useEffect(() => {
     localStorage.setItem(historyFilterStorageKey, JSON.stringify(historyFilters));
@@ -1428,36 +1560,73 @@ export default function App() {
     }
   };
 
-  const refreshProviderRepositories = async (provider: GitProvider = "azure-devops", localPaths = providerLocalPaths) => {
+  const refreshProviderRepositories = async (provider?: GitProvider, localPaths = providerLocalPaths) => {
     setProviderLoading(true);
     setProviderError(null);
-    try {
-      const catalog = await listProviderRepositories(provider, localPaths);
-      if (provider === "azure-devops") {
-        setAzureDevOpsConfigured(true);
-      }
-      setProviderCatalog(catalog);
-      setOperationLog((log) => [`Repository catalog refreshed: ${catalog.repositories.length} repos`, ...log].slice(0, 8));
-    } catch (operationError) {
-      const message = operationError instanceof Error ? operationError.message : String(operationError);
-      setProviderError(message);
-      setOperationLog((log) => [`Repository catalog failed: ${message}`, ...log].slice(0, 8));
-      if (operationError instanceof OpenGitApiError) {
-        if (operationError.code === "AZURE_DEVOPS_TOKEN_MISSING") {
-          setAzureDevOpsConfigured(false);
-          setPreferredIntegration("Azure DevOps");
-          setPreferencesSection("integrations");
-          setPreferencesOpen(true);
-        } else if (operationError.code === "AZURE_DEVOPS_AUTH_FAILED") {
-          setAzureDevOpsConfigured(true);
-          setPreferredIntegration("Azure DevOps");
-          setPreferencesSection("integrations");
-          setPreferencesOpen(true);
+
+    // Query the requested provider, otherwise every configured provider —
+    // falling back to both so first-time users still get the token prompts.
+    const configuredProviders: GitProvider[] = [
+      ...(azureDevOpsConfigured ? (["azure-devops"] as const) : []),
+      ...(githubConfigured ? (["github"] as const) : [])
+    ];
+    const providers: GitProvider[] = provider
+      ? [provider]
+      : configuredProviders.length > 0
+        ? configuredProviders
+        : ["azure-devops", "github"];
+
+    const catalogs: ProviderRepoCatalog[] = [];
+    const failures: Array<{ provider: GitProvider; error: unknown }> = [];
+    for (const item of providers) {
+      try {
+        const catalog = await listProviderRepositories(item, localPaths);
+        if (item === "azure-devops") setAzureDevOpsConfigured(true);
+        if (item === "github") setGithubConfigured(true);
+        catalogs.push(catalog);
+      } catch (operationError) {
+        failures.push({ provider: item, error: operationError });
+        if (operationError instanceof OpenGitApiError) {
+          if (operationError.code === "AZURE_DEVOPS_TOKEN_MISSING") setAzureDevOpsConfigured(false);
+          if (operationError.code === "GITHUB_TOKEN_MISSING") setGithubConfigured(false);
         }
       }
-    } finally {
-      setProviderLoading(false);
     }
+
+    if (catalogs.length > 0) {
+      const merged: ProviderRepoCatalog = {
+        provider: catalogs.length === 1 ? catalogs[0].provider : "unknown",
+        accounts: catalogs.flatMap((catalog) => catalog.accounts),
+        projects: catalogs.flatMap((catalog) => catalog.projects),
+        repositories: catalogs.flatMap((catalog) => catalog.repositories),
+        refreshedAt: catalogs[catalogs.length - 1].refreshedAt
+      };
+      setProviderCatalog(merged);
+      setOperationLog((log) => [`Repository catalog refreshed: ${merged.repositories.length} repos`, ...log].slice(0, 8));
+      if (failures.length > 0) {
+        const message = failures
+          .map(({ provider: failed, error }) => `${failed}: ${error instanceof Error ? error.message : String(error)}`)
+          .join(" — ");
+        setOperationLog((log) => [`Some providers failed: ${message}`, ...log].slice(0, 8));
+      }
+    } else {
+      const message = failures
+        .map(({ provider: failed, error }) => `${failed}: ${error instanceof Error ? error.message : String(error)}`)
+        .join(" — ");
+      setProviderError(message || "No repository providers are configured.");
+      setOperationLog((log) => [`Repository catalog failed: ${message}`, ...log].slice(0, 8));
+      const tokenIssue = failures.find(
+        ({ error }) =>
+          error instanceof OpenGitApiError &&
+          ["AZURE_DEVOPS_TOKEN_MISSING", "AZURE_DEVOPS_AUTH_FAILED", "GITHUB_TOKEN_MISSING", "GITHUB_AUTH_FAILED"].includes(error.code)
+      );
+      if (tokenIssue) {
+        setPreferredIntegration(tokenIssue.provider === "github" ? "GitHub" : "Azure DevOps");
+        setPreferencesSection("integrations");
+        setPreferencesOpen(true);
+      }
+    }
+    setProviderLoading(false);
   };
 
   const openRepositoryManagement = () => {
@@ -1797,6 +1966,48 @@ export default function App() {
 
     if (action === "copy-sha") {
       void copyMenuText("commit SHA", target.commitSha);
+      return;
+    }
+
+    if (action === "open-pr" || action === "copy-branch-link" || action === "copy-commit-link") {
+      const webInfo = providerWebInfo(snapshot);
+      if (!webInfo) {
+        setBranchMenu(null);
+        setError("This repository has no recognized GitHub or Azure DevOps remote.");
+        return;
+      }
+      if (action === "copy-commit-link") {
+        void copyMenuText("commit link", target.commitSha ? providerCommitUrl(webInfo, target.commitSha) : undefined);
+        return;
+      }
+      const branchName = stripRemotePrefix(target);
+      if (action === "copy-branch-link") {
+        void copyMenuText("branch link", providerBranchUrl(webInfo, branchName));
+        return;
+      }
+      setBranchMenu(null);
+      void openExternalUrl(providerPrCreateUrl(webInfo, branchName));
+      setOperationLog((log) => [`Opened pull request page for ${branchName}`, ...log].slice(0, 8));
+      return;
+    }
+
+    if (action === "explain") {
+      setBranchMenu(null);
+      const repo = requireRepo();
+      if (!repo) return;
+      const branchName = stripRemotePrefix(target);
+      setBranchExplain({ branch: branchName, loading: true });
+      void explainBranchChanges(repo, target.isRemote ? target.name : branchName, openAiModel, aiProvider)
+        .then((result) => {
+          setBranchExplain({ branch: result.branch, base: result.base, markdown: result.markdown, loading: false });
+        })
+        .catch((explainError) => {
+          setBranchExplain({
+            branch: branchName,
+            loading: false,
+            error: explainError instanceof Error ? explainError.message : String(explainError)
+          });
+        });
       return;
     }
 
@@ -2288,7 +2499,7 @@ export default function App() {
     setAiGeneratingCommit(true);
     setError(null);
     try {
-      const suggestion = await generateAiCommitMessage(repo, openAiModel);
+      const suggestion = await generateAiCommitMessage(repo, openAiModel, aiProvider);
       const nextMessage = [suggestion.summary, suggestion.description].filter((part) => part.trim()).join("\n\n");
       setCommitMessage(nextMessage);
       setOperationLog((log) => ["Generated commit message from staged files", ...log].slice(0, 8));
@@ -2345,7 +2556,7 @@ export default function App() {
     setAiGeneratingPr(true);
     setError(null);
     try {
-      const suggestion = await generateAiPrDescription(repo, openAiModel);
+      const suggestion = await generateAiPrDescription(repo, openAiModel, aiProvider);
       setAiPrDraft(suggestion);
       setOperationLog((log) => ["Generated PR title and description from branch diff", ...log].slice(0, 8));
     } catch (operationError) {
@@ -3324,8 +3535,24 @@ export default function App() {
         <BranchContextMenu
           state={branchMenu}
           snapshot={snapshot}
+          providerLinks={providerWebInfo(snapshot)}
+          aiConfigured={openAiConfigured || claudeConfigured}
           onAction={handleBranchMenuAction}
           onClose={() => setBranchMenu(null)}
+        />
+      )}
+
+      {branchExplain && (
+        <BranchExplainDialog
+          state={branchExplain}
+          onCopy={() => {
+            if (!branchExplain.markdown) return;
+            void navigator.clipboard
+              .writeText(branchExplain.markdown)
+              .then(() => setOperationLog((log) => ["Copied branch explanation", ...log].slice(0, 8)))
+              .catch(() => setError("Clipboard is unavailable in this environment."));
+          }}
+          onClose={() => setBranchExplain(null)}
         />
       )}
 
@@ -3401,6 +3628,14 @@ export default function App() {
           setOpenAiModel={setOpenAiModel}
           azureDevOpsConfigured={azureDevOpsConfigured}
           setAzureDevOpsConfigured={setAzureDevOpsConfigured}
+          githubConfigured={githubConfigured}
+          setGithubConfigured={setGithubConfigured}
+          githubLogin={githubLogin}
+          setGithubLogin={setGithubLogin}
+          claudeConfigured={claudeConfigured}
+          setClaudeConfigured={setClaudeConfigured}
+          aiProvider={aiProvider}
+          setAiProvider={setAiProvider}
           preferredIntegration={preferredIntegration}
           openRepositoryManagement={openRepositoryManagement}
         />
@@ -3514,6 +3749,61 @@ function PromptDialog({
             </Button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+function BranchExplainDialog({
+  state,
+  onCopy,
+  onClose
+}: {
+  state: BranchExplainState;
+  onCopy: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="prompt-backdrop" onMouseDown={onClose}>
+      <div
+        className="prompt-dialog branch-explain-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Explanation of ${state.branch}`}
+        onMouseDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onClose();
+          }
+        }}
+      >
+        <div className="confirm-body">
+          <div className="prompt-header">
+            <h2>Explain {state.branch}</h2>
+            <IconButton label="Close explanation" onClick={onClose}>
+              <X size={14} />
+            </IconButton>
+          </div>
+          {state.loading ? (
+            <p className="prompt-message">Analyzing branch changes with AI…</p>
+          ) : state.error ? (
+            <p className="prompt-message">{state.error}</p>
+          ) : (
+            <>
+              {state.base && <p className="prompt-message">Compared against {state.base}.</p>}
+              <pre className="branch-explain-markdown">{state.markdown}</pre>
+            </>
+          )}
+          <div className="prompt-actions">
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Close
+            </Button>
+            <Button type="button" variant="primary" onClick={onCopy} disabled={state.loading || !state.markdown}>
+              Copy Markdown
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -3642,16 +3932,20 @@ function RepoTabStrip({
 function BranchContextMenu({
   state,
   snapshot,
+  providerLinks,
+  aiConfigured,
   onAction,
   onClose
 }: {
   state: BranchMenuState;
   snapshot: RepoSnapshot | null;
+  providerLinks: ProviderWebInfo | null;
+  aiConfigured: boolean;
   onAction: (action: BranchMenuAction, target: BranchMenuTarget) => void;
   onClose: () => void;
 }) {
   const { target } = state;
-  const items = branchMenuItems(target, snapshot);
+  const items = branchMenuItems(target, snapshot, { providerLinks, aiConfigured });
   const menuStyle = {
     left: state.x,
     top: state.y,
@@ -5830,6 +6124,7 @@ function RepositoryManagementPanel({
         <select value={filters.provider} onChange={(event) => updateFilter("provider", event.target.value)}>
           <option value="all">All providers</option>
           <option value="azure-devops">Azure DevOps</option>
+          <option value="github">GitHub</option>
         </select>
         <select value={filters.project} onChange={(event) => updateFilter("project", event.target.value)}>
           <option value="all">All projects</option>
@@ -6318,6 +6613,14 @@ function PreferencesPanel({
   setOpenAiModel,
   azureDevOpsConfigured,
   setAzureDevOpsConfigured,
+  githubConfigured,
+  setGithubConfigured,
+  githubLogin,
+  setGithubLogin,
+  claudeConfigured,
+  setClaudeConfigured,
+  aiProvider,
+  setAiProvider,
   preferredIntegration,
   openRepositoryManagement
 }: {
@@ -6339,6 +6642,14 @@ function PreferencesPanel({
   setOpenAiModel: (model: string) => void;
   azureDevOpsConfigured: boolean;
   setAzureDevOpsConfigured: (configured: boolean) => void;
+  githubConfigured: boolean;
+  setGithubConfigured: (configured: boolean) => void;
+  githubLogin: string | null;
+  setGithubLogin: (login: string | null) => void;
+  claudeConfigured: boolean;
+  setClaudeConfigured: (configured: boolean) => void;
+  aiProvider: AiProviderPreference;
+  setAiProvider: (provider: AiProviderPreference) => void;
   preferredIntegration: string;
   openRepositoryManagement: () => void;
 }) {
@@ -6356,6 +6667,12 @@ function PreferencesPanel({
   const [azureDevOpsPat, setAzureDevOpsPat] = useState("");
   const [azureDevOpsBusy, setAzureDevOpsBusy] = useState(false);
   const [azureDevOpsMessage, setAzureDevOpsMessage] = useState<string | null>(null);
+  const [githubPat, setGithubPat] = useState("");
+  const [githubBusy, setGithubBusy] = useState(false);
+  const [githubMessage, setGithubMessage] = useState<string | null>(null);
+  const [claudeKey, setClaudeKey] = useState("");
+  const [claudeBusy, setClaudeBusy] = useState(false);
+  const [claudeMessage, setClaudeMessage] = useState<string | null>(null);
   const openAiStatusMessage = runningInTauri
     ? `Saved-state: ${openAiConfigured ? "API key remembered" : "not checked at startup"}. OpenGit checks the keychain only when you save, test, or generate.`
     : "Status: Browser preview cannot save secure OpenAI keys. Open the Tauri desktop window to store the key in the operating system keychain.";
@@ -6363,9 +6680,18 @@ function PreferencesPanel({
     ? `Saved-state: ${azureDevOpsConfigured ? "PAT remembered" : "not checked at startup"}. OpenGit checks the keychain only when you save the PAT or use Azure DevOps.`
     : "Status: Browser preview cannot save secure Azure DevOps tokens. Open the Tauri desktop window to store the PAT in the operating system keychain.";
 
+  const githubStatusMessage = runningInTauri
+    ? `Saved-state: ${githubConfigured ? (githubLogin ? `connected as ${githubLogin}` : "PAT remembered") : "not checked at startup"}. OpenGit checks the keychain only when you save the PAT or use GitHub.`
+    : "Status: Browser preview cannot save secure GitHub tokens. Open the Tauri desktop window to store the PAT in the operating system keychain.";
+  const claudeStatusMessage = runningInTauri
+    ? `Saved-state: ${claudeConfigured ? "API key remembered" : "not checked at startup"}. OpenGit checks the keychain only when you save, test, or generate.`
+    : "Status: Browser preview cannot save secure Claude keys. Open the Tauri desktop window to store the key in the operating system keychain.";
+
   const availableIntegrations: Array<{ label: string; icon: typeof Settings }> = [
     { label: "OpenAI", icon: Sparkles },
-    { label: "Azure DevOps", icon: Link2 }
+    { label: "Claude (Anthropic)", icon: Bot },
+    { label: "Azure DevOps", icon: Link2 },
+    { label: "GitHub", icon: Github }
   ];
 
   useEffect(() => {
@@ -6809,6 +7135,160 @@ function PreferencesPanel({
                     Open Repository Management
                   </Button>
                   {azureDevOpsMessage && <div className="settings-note">{azureDevOpsMessage}</div>}
+                </div>
+              ) : integration === "GitHub" ? (
+                <div className="integration-detail">
+                  <h3>GitHub</h3>
+                  <p>Used to browse and clone your GitHub repositories in Repository Management and to build provider links.</p>
+                  <SettingRow label="Personal Access Token" description="Stored in the operating system keychain through the Rust backend. Use a fine-grained or classic PAT with repo read access.">
+                    <div className="secret-setting">
+                      <input
+                        value={githubPat}
+                        onChange={(event) => setGithubPat(event.target.value)}
+                        type="password"
+                        placeholder={runningInTauri ? (githubConfigured ? "PAT saved" : "GitHub PAT") : "Open desktop window to save PAT"}
+                        disabled={!runningInTauri}
+                        aria-label="GitHub personal access token"
+                      />
+                      <div className="secret-actions">
+                        <Button
+                          variant="primary"
+                          disabled={!runningInTauri || githubBusy || !githubPat.trim()}
+                          onClick={async () => {
+                            setGithubBusy(true);
+                            setGithubMessage(null);
+                            try {
+                              const status = await saveGitHubPat(githubPat);
+                              setGithubConfigured(status.configured);
+                              setGithubLogin(status.login ?? null);
+                              setGithubPat("");
+                              setGithubMessage(status.login ? `GitHub PAT saved. Connected as ${status.login}${status.name ? ` (${status.name})` : ""}.` : "GitHub PAT saved.");
+                            } catch (error) {
+                              setGithubMessage(error instanceof Error ? error.message : String(error));
+                            } finally {
+                              setGithubBusy(false);
+                            }
+                          }}
+                        >
+                          Save &amp; Test PAT
+                        </Button>
+                        <Button
+                          variant="danger"
+                          disabled={!runningInTauri || githubBusy || !githubConfigured}
+                          onClick={async () => {
+                            setGithubBusy(true);
+                            setGithubMessage(null);
+                            try {
+                              const status = await clearGitHubPat();
+                              setGithubConfigured(status.configured);
+                              setGithubLogin(null);
+                              setGithubMessage("GitHub PAT removed.");
+                            } catch (error) {
+                              setGithubMessage(error instanceof Error ? error.message : String(error));
+                            } finally {
+                              setGithubBusy(false);
+                            }
+                          }}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    </div>
+                  </SettingRow>
+                  <div className="settings-note">{githubStatusMessage}</div>
+                  <div className="settings-note">Saving validates the token against the GitHub API before it is stored, so a mistyped PAT never lands in the keychain.</div>
+                  <Button variant="secondary" onClick={openRepositoryManagement}>
+                    Open Repository Management
+                  </Button>
+                  {githubMessage && <div className="settings-note">{githubMessage}</div>}
+                </div>
+              ) : integration === "Claude (Anthropic)" ? (
+                <div className="integration-detail">
+                  <h3>Claude (Anthropic)</h3>
+                  <p>Used for AI commit messages, PR text, and branch explanations. OpenGit sends the Git context to Anthropic when Claude is the selected provider.</p>
+                  <SettingRow label="API Key" description="Stored in the operating system keychain through the Rust backend, not localStorage. Use a console.anthropic.com API key.">
+                    <div className="secret-setting">
+                      <input
+                        value={claudeKey}
+                        onChange={(event) => setClaudeKey(event.target.value)}
+                        type="password"
+                        placeholder={runningInTauri ? (claudeConfigured ? "API key saved" : "sk-ant-...") : "Open desktop window to save key"}
+                        disabled={!runningInTauri}
+                        aria-label="Claude API key"
+                      />
+                      <div className="secret-actions">
+                        <Button
+                          variant="primary"
+                          disabled={!runningInTauri || claudeBusy || !claudeKey.trim()}
+                          onClick={async () => {
+                            setClaudeBusy(true);
+                            setClaudeMessage(null);
+                            try {
+                              const status = await saveClaudeApiKey(claudeKey);
+                              setClaudeConfigured(status.configured);
+                              setClaudeKey("");
+                              setClaudeMessage("Claude API key saved.");
+                            } catch (error) {
+                              setClaudeMessage(error instanceof Error ? error.message : String(error));
+                            } finally {
+                              setClaudeBusy(false);
+                            }
+                          }}
+                        >
+                          Save Key
+                        </Button>
+                        <Button
+                          variant="secondary"
+                          disabled={!runningInTauri || claudeBusy}
+                          onClick={async () => {
+                            setClaudeBusy(true);
+                            setClaudeMessage(null);
+                            try {
+                              const result = await testClaudeApiKey();
+                              if (result.configured) {
+                                setClaudeConfigured(true);
+                              }
+                              setClaudeMessage(result.message);
+                            } catch (error) {
+                              setClaudeMessage(error instanceof Error ? error.message : String(error));
+                            } finally {
+                              setClaudeBusy(false);
+                            }
+                          }}
+                        >
+                          Test Key
+                        </Button>
+                        <Button
+                          variant="danger"
+                          disabled={!runningInTauri || claudeBusy || !claudeConfigured}
+                          onClick={async () => {
+                            setClaudeBusy(true);
+                            setClaudeMessage(null);
+                            try {
+                              const status = await clearClaudeApiKey();
+                              setClaudeConfigured(status.configured);
+                              setClaudeMessage("Claude API key removed.");
+                            } catch (error) {
+                              setClaudeMessage(error instanceof Error ? error.message : String(error));
+                            } finally {
+                              setClaudeBusy(false);
+                            }
+                          }}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    </div>
+                  </SettingRow>
+                  <SettingRow label="AI provider" description="Which provider handles AI generation. Auto uses whichever single key exists; Claude wins when both are configured.">
+                    <select value={aiProvider} onChange={(event) => setAiProvider(event.target.value as AiProviderPreference)} aria-label="AI provider">
+                      <option value="auto">Auto</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="claude">Claude</option>
+                    </select>
+                  </SettingRow>
+                  <div className="settings-note">{claudeStatusMessage}</div>
+                  {claudeMessage && <div className="settings-note">{claudeMessage}</div>}
                 </div>
               ) : null}
             </div>
@@ -7333,7 +7813,11 @@ function statusLabel(change: { status: FileStatus }) {
   return "M";
 }
 
-function branchMenuItems(target: BranchMenuTarget, snapshot: RepoSnapshot | null): BranchMenuItem[] {
+function branchMenuItems(
+  target: BranchMenuTarget,
+  snapshot: RepoSnapshot | null,
+  options?: { providerLinks?: ProviderWebInfo | null; aiConfigured?: boolean }
+): BranchMenuItem[] {
   const currentBranch = snapshot?.currentBranch ?? "current branch";
   const hasRemote = (snapshot?.remotes.length ?? 0) > 0;
   const localBranch = !target.isRemote && !target.isTag && !target.isUnborn && !target.isCommitOnly;
@@ -7414,6 +7898,32 @@ function branchMenuItems(target: BranchMenuTarget, snapshot: RepoSnapshot | null
       disabled: !canDelete,
       hint: target.isCurrent ? "current branch" : target.isProtected ? "protected branch" : !localBranch ? `not a local ${branchRef}` : undefined
     },
+    ...(options?.providerLinks
+      ? ([
+          { type: "separator", key: "provider" },
+          {
+            type: "item",
+            action: "open-pr",
+            label: `Start pull request from ${target.name}`,
+            disabled: target.isTag || target.isCommitOnly || target.isUnborn,
+            hint: target.isTag || target.isCommitOnly ? "not a branch" : undefined
+          },
+          { type: "item", action: "copy-branch-link", label: "Copy branch link", disabled: target.isTag || target.isCommitOnly || target.isUnborn },
+          { type: "item", action: "copy-commit-link", label: "Copy commit link", disabled: !target.commitSha }
+        ] satisfies BranchMenuItem[])
+      : []),
+    ...(options?.aiConfigured
+      ? ([
+          { type: "separator", key: "ai" },
+          {
+            type: "item",
+            action: "explain",
+            label: `Explain changes on ${target.name}`,
+            disabled: target.isTag || target.isCommitOnly || target.isUnborn,
+            hint: target.isTag || target.isCommitOnly ? "not a branch" : undefined
+          }
+        ] satisfies BranchMenuItem[])
+      : []),
     { type: "separator", key: "copy" },
     { type: "item", action: "copy-name", label: target.isTag ? "Copy tag name" : "Copy branch name" },
     { type: "item", action: "copy-sha", label: "Copy commit sha", disabled: !target.commitSha },
