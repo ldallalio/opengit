@@ -196,7 +196,7 @@ textarea:focus-visible {
 
 .workspace {
   display: grid;
-  grid-template-rows: 36px 58px auto minmax(0, 1fr);
+  grid-template-rows: 36px 70px auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
 }
