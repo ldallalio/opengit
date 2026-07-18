@@ -81,7 +81,7 @@ jobs:
 
             Artifacts are updater-signed by Tauri. macOS bundles are code-signed and notarized when signing secrets are configured; Windows binaries are currently unsigned.
           releaseDraft: true
-          prerelease: true
+          prerelease: false
           args: ${{ matrix.args }} --config src-tauri/tauri.release.conf.json
 
       # Tauri notarizes the .app but not the DMG wrapper; notarize + staple the

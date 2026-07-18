@@ -180,6 +180,44 @@ a:hover {
   font-size: 13px;
 }
 
+/* Thank-you / download page */
+.thanks-download {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+.thanks-all {
+  margin-bottom: 28px;
+}
+.thanks-links {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 13px;
+  margin-top: 6px;
+}
+.thanks-links a {
+  color: var(--accent);
+}
+.thanks-notes {
+  max-width: 520px;
+  margin: 0 auto 24px;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 18px 22px;
+}
+.thanks-notes p {
+  font-size: 13px;
+  color: var(--body);
+  margin: 8px 0;
+}
+.thanks-notes strong {
+  color: var(--text);
+}
+
 /* Screenshot frame */
 .shot {
   margin: 56px auto 0;
