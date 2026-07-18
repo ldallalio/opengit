@@ -48,4 +48,10 @@ jobs:
 
       - run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
 
-      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      # Several tests spawn a real `git` subprocess per commit (up to 55 in a
+      # loop) against their own temp repo. Full default parallelism on the
+      # 4-vCPU ubuntu-latest runner has intermittently starved these under
+      # load ("could not parse HEAD" / "could not read <sha>" — see
+      # 065a9b3); capping thread count is cheap insurance against that class
+      # of flake without weakening the test itself.
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml -- --test-threads=2
