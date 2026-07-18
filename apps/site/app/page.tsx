@@ -1,6 +1,6 @@
 const REPO_URL = "https://github.com/ldallalio/opengit";
 // TODO: replace with the real Lemon Squeezy product checkout URL before launch.
-const CHECKOUT_URL = "https://opengit.lemonsqueezy.com/checkout";
+const CHECKOUT_URL = "https://buy.stripe.com/28E8wQ00UdXlbsU5nJ93y00";
 
 function Icon({ path }: { path: string }) {
   return (
