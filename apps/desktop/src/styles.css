@@ -508,6 +508,20 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+/* Narrow windows: collapse to the two icon buttons (same pickers) instead of
+   letting overflow clip the path field and Open button into slivers. */
+@media (max-width: 1180px) {
+  .repo-open {
+    grid-template-columns: 32px 32px;
+  }
+
+  .repo-open > svg,
+  .repo-open input,
+  .repo-open .og-button {
+    display: none;
+  }
+}
+
 input,
 textarea {
   width: 100%;

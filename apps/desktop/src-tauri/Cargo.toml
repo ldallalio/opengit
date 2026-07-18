@@ -1,6 +1,6 @@
 [package]
 name = "opengit-desktop"
-version = "0.2.6"
+version = "0.2.7"
 description = "OpenGit desktop backend"
 authors = ["OpenGit"]
 license = "MIT"
