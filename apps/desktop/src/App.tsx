@@ -49,6 +49,7 @@ import {
   GitFork,
   Github,
   GitPullRequest,
+  Heart,
   History,
   HardDrive,
   Eye,
@@ -2834,6 +2835,10 @@ export default function App() {
     await openExternalUrl(`https://github.com/ldallalio/opengit/issues/new?body=${encodeURIComponent(body)}`);
   };
 
+  const openDonate = async () => {
+    await openExternalUrl("https://donate.stripe.com/3cIeVebJCf1p40s6rN93y01");
+  };
+
   return (
     <main className="app-shell">
       <aside className="rail" aria-label="Primary">
@@ -2858,6 +2863,9 @@ export default function App() {
         <div className="rail-spacer" />
         <IconButton label="Report an issue" onClick={() => void openIssueReport()}>
           <Bug size={18} />
+        </IconButton>
+        <IconButton label="Support OpenGit" onClick={() => void openDonate()}>
+          <Heart size={18} />
         </IconButton>
         <IconButton label="Preferences" onClick={() => setPreferencesOpen(true)}>
           <Settings size={18} />

@@ -6,6 +6,13 @@
       "runtimeExecutable": "npx",
       "runtimeArgs": ["serve", "apps/site/out", "-l", "4173"],
       "port": 4173
+    },
+    {
+      "name": "opengit-desktop-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "apps/desktop",
+      "port": 1420
     }
   ]
 }

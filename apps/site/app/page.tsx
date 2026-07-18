@@ -1,6 +1,6 @@
 const REPO_URL = "https://github.com/ldallalio/opengit";
-// TODO: replace with the real Lemon Squeezy product checkout URL before launch.
 const CHECKOUT_URL = "https://buy.stripe.com/28E8wQ00UdXlbsU5nJ93y00";
+const DONATE_URL = "https://donate.stripe.com/3cIeVebJCf1p40s6rN93y01";
 
 function Icon({ path }: { path: string }) {
   return (
@@ -208,6 +208,10 @@ export default function Page() {
                 <a className="btn btn-secondary" href={REPO_URL}>
                   Get the source
                 </a>
+                <p className="price-note">
+                  Not buying? You can still{" "}
+                  <a href={DONATE_URL}>chip in a few dollars</a>.
+                </p>
               </div>
               <div className="price-card featured">
                 <div className="price-tag">Official builds</div>
