@@ -145,9 +145,12 @@ export default function Page() {
                 <span />
               </div>
               <div className="shot-body">
-                {/* Screenshot placeholder: drop a PNG in public/ and swap this block for an <img>. */}
-                <strong>app screenshot</strong>
-                <span>commit graph, staging, and diff view</span>
+                <img
+                  src="/opengit-screenshot.png"
+                  alt="OpenGit showing the git/git repository: commit graph with merge lanes, branch sidebar, and commit detail"
+                  width={2555}
+                  height={1435}
+                />
               </div>
             </div>
           </div>
