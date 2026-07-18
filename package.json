@@ -1,6 +1,6 @@
 {
   "name": "opengit",
-  "version": "0.2.7",
+  "version": "0.3.0",
   "private": true,
   "description": "A local-first cross-platform Git desktop client.",
   "license": "MIT",
