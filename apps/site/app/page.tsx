@@ -128,7 +128,7 @@ export default function Page() {
             </p>
             <div className="hero-actions">
               <a className="btn btn-primary" href={CHECKOUT_URL}>
-                Buy for $15, once
+                Buy for $15
               </a>
               <a className="btn btn-secondary" href={REPO_URL}>
                 View source on GitHub
