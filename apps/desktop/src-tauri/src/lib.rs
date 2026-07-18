@@ -8419,19 +8419,33 @@ mod tests {
     }
 
     fn run_git_test(repo: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()
-            .expect("git command should run");
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
+        // CI runners (ubuntu-latest in particular) have intermittently hit
+        // transient "unable to read <sha>" / "could not parse HEAD" errors
+        // here that don't reproduce on retry - looks like runner-storage
+        // I/O flakiness rather than anything git or this code is doing
+        // wrong, so retry a couple of times before failing the test for real.
+        let mut last_output = None;
+        for attempt in 0..3 {
+            let output = std::process::Command::new("git")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("git command should run");
+            if output.status.success() {
+                return String::from_utf8_lossy(&output.stdout).to_string();
+            }
+            if attempt < 2 {
+                std::thread::sleep(std::time::Duration::from_millis(50 * (attempt + 1)));
+            }
+            last_output = Some(output);
+        }
+        let output = last_output.expect("at least one attempt should have run");
+        panic!(
+            "git {:?} failed after retries: {}",
             args,
             String::from_utf8_lossy(&output.stderr)
         );
-        String::from_utf8_lossy(&output.stdout).to_string()
     }
 }
