@@ -46,7 +46,12 @@ export function Panel({
   return (
     <section className={clsx("og-panel", collapsed && "og-panel-collapsed", className)} {...props}>
       {(title || actions) && (
-        <div className="og-panel-header">
+        <div
+          className="og-panel-header"
+          onClick={collapsible && collapsed ? () => setCollapsed(false) : undefined}
+          role={collapsible && collapsed ? "button" : undefined}
+          title={collapsible && collapsed ? `Expand ${title ?? "section"}` : undefined}
+        >
           <div className="og-panel-title">
             {collapsible && (
               <button

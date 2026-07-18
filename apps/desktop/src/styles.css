@@ -360,7 +360,7 @@ textarea:focus-visible {
 
 .topbar {
   display: grid;
-  grid-template-columns: minmax(260px, 460px) minmax(200px, 1fr) auto auto minmax(160px, 260px);
+  grid-template-columns: minmax(260px, 640px) minmax(120px, 1fr) auto auto minmax(160px, 260px);
   gap: 12px;
   align-items: center;
   padding: 6px 12px;
@@ -839,6 +839,39 @@ textarea {
   --bottom-operations-track: 42px;
 }
 
+/* Collapsed vertical strips: whole header expands on click, title reads
+   vertically, and the neighboring resize handle goes inert. */
+.right-commit-panel.og-panel-collapsed .og-panel-header,
+.operations-panel.og-panel-collapsed .og-panel-header {
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  cursor: pointer;
+  padding: 8px 0;
+}
+
+.right-commit-panel.og-panel-collapsed .og-panel-title,
+.operations-panel.og-panel-collapsed .og-panel-title {
+  flex-direction: column;
+  gap: 8px;
+}
+
+.right-commit-panel.og-panel-collapsed .og-panel-title h2,
+.operations-panel.og-panel-collapsed .og-panel-title h2 {
+  writing-mode: vertical-rl;
+}
+
+.right-commit-panel.og-panel-collapsed .og-panel-header:hover,
+.operations-panel.og-panel-collapsed .og-panel-header:hover {
+  background: var(--panel-3);
+}
+
+.detail-stack:has(.right-commit-panel.og-panel-collapsed) .detail-stack-resize,
+.bottom-area:has(.operations-panel.og-panel-collapsed) .bottom-operations-resize {
+  pointer-events: none;
+}
+
 .resize-handle {
   position: relative;
   border: 0;
@@ -919,6 +952,43 @@ body.resizing-layout-horizontal {
 
 .sidebar .og-panel-collapsed .og-panel-actions {
   opacity: 0.68;
+}
+
+input[type="checkbox"] {
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  flex: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--panel-2);
+  display: inline-grid;
+  place-content: center;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+input[type="checkbox"]:hover {
+  border-color: var(--accent, #58a6ff);
+}
+
+input[type="checkbox"]:checked {
+  background: var(--accent, #58a6ff);
+  border-color: var(--accent, #58a6ff);
+}
+
+input[type="checkbox"]:checked::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  background: #0d1117;
+  clip-path: polygon(14% 46%, 0 62%, 38% 100%, 100% 18%, 84% 4%, 38% 68%);
+}
+
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent, #58a6ff);
+  outline-offset: 1px;
 }
 
 .og-panel-header {
