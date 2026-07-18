@@ -19,6 +19,9 @@ const MAX_HISTORY_LIMIT: u32 = 2_000;
 const OPENAI_KEY_SERVICE: &str = "OpenGit";
 const OPENAI_KEY_ACCOUNT: &str = "openai-api-key";
 const AZURE_DEVOPS_PAT_ACCOUNT: &str = "azure-devops-pat";
+const GITHUB_PAT_ACCOUNT: &str = "github-pat";
+const GITHUB_API_BASE: &str = "https://api.github.com";
+const GITHUB_USER_AGENT: &str = "OpenGit";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5-mini";
 const MAX_STAGED_DIFF_CHARS: usize = 48_000;
 /// Upper bound on the number of working-tree change entries returned in a snapshot.
@@ -601,6 +604,14 @@ struct AzureDevOpsStatus {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct GithubStatus {
+    configured: bool,
+    login: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ProviderAccountStatus {
     provider: GitProvider,
     configured: bool,
@@ -741,6 +752,14 @@ struct AiBranchNameSuggestion {
 struct AiPrDescriptionSuggestion {
     title: String,
     description: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiBranchExplanation {
+    branch: String,
+    base: String,
+    markdown: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1505,27 +1524,90 @@ async fn azure_devops_clear_pat() -> CommandResult<AzureDevOpsStatus> {
 }
 
 #[tauri::command]
+async fn github_status() -> CommandResult<GithubStatus> {
+    Ok(GithubStatus {
+        configured: read_github_pat()?.is_some(),
+        login: None,
+        name: None,
+    })
+}
+
+#[tauri::command]
+async fn github_save_pat(pat: String) -> CommandResult<GithubStatus> {
+    let value = pat.trim();
+    if value.is_empty() {
+        return invalid("INVALID_GITHUB_PAT", "GitHub PAT is required.");
+    }
+    if value.chars().any(|ch| ch.is_control()) {
+        return invalid("INVALID_GITHUB_PAT", "GitHub PAT contains unsafe characters.");
+    }
+
+    // Validate before storing so a mistyped token never lands in the keychain.
+    let user: GithubUserWire =
+        github_get_json(&reqwest::Client::new(), &format!("{GITHUB_API_BASE}/user"), value).await?;
+
+    let entry = github_pat_entry()?;
+    entry.set_password(value).map_err(map_keyring_error)?;
+    if read_github_pat()?.as_deref() != Some(value) {
+        return invalid(
+            "GITHUB_PAT_VERIFY_FAILED",
+            "GitHub PAT was saved but could not be read through the normal status path.",
+        );
+    }
+    Ok(GithubStatus {
+        configured: true,
+        login: Some(user.login),
+        name: user.name,
+    })
+}
+
+#[tauri::command]
+async fn github_clear_pat() -> CommandResult<GithubStatus> {
+    let entry = github_pat_entry()?;
+    match entry.delete_credential() {
+        Ok(_) | Err(KeyringError::NoEntry) => Ok(GithubStatus {
+            configured: false,
+            login: None,
+            name: None,
+        }),
+        Err(error) => Err(map_keyring_error(error)),
+    }
+}
+
+#[tauri::command]
 async fn provider_accounts_status() -> CommandResult<Vec<ProviderAccountStatus>> {
-    Ok(vec![ProviderAccountStatus {
-        provider: GitProvider::AzureDevops,
-        configured: false,
-        status: ProviderConnectionStatus::Unavailable,
-        label: "Azure DevOps".to_string(),
-        detail: Some(
-            "OpenGit checks the keychain only when you save a PAT or use Azure DevOps."
-                .to_string(),
-        ),
-    }])
+    Ok(vec![
+        ProviderAccountStatus {
+            provider: GitProvider::AzureDevops,
+            configured: false,
+            status: ProviderConnectionStatus::Unavailable,
+            label: "Azure DevOps".to_string(),
+            detail: Some(
+                "OpenGit checks the keychain only when you save a PAT or use Azure DevOps."
+                    .to_string(),
+            ),
+        },
+        ProviderAccountStatus {
+            provider: GitProvider::Github,
+            configured: false,
+            status: ProviderConnectionStatus::Unavailable,
+            label: "GitHub".to_string(),
+            detail: Some(
+                "OpenGit checks the keychain only when you save a PAT or use GitHub.".to_string(),
+            ),
+        },
+    ])
 }
 
 #[tauri::command]
 async fn provider_repos_list(request: ProviderReposListRequest) -> CommandResult<ProviderRepoCatalog> {
     match request.provider {
         GitProvider::AzureDevops => list_azure_devops_repositories(request.local_paths).await,
+        GitProvider::Github => list_github_repositories(request.local_paths).await,
         _ => Err(AppError::ProviderFailed {
             code: "PROVIDER_UNAVAILABLE",
             message: "This provider is not supported yet.".to_string(),
-            detail: "Only Azure DevOps repository management is implemented.".to_string(),
+            detail: "Only Azure DevOps and GitHub repository management are implemented.".to_string(),
         }),
     }
 }
@@ -1629,6 +1711,55 @@ async fn ai_pr_description_generate(
     .await?;
 
     parse_openai_pr_response(&body_text)
+}
+
+#[tauri::command]
+async fn ai_branch_explain(
+    repo_path: String,
+    branch: String,
+    model: Option<String>,
+) -> CommandResult<AiBranchExplanation> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&branch, "branch name")?;
+    let api_key = read_openai_api_key()?.ok_or_else(|| AppError::InvalidInput {
+        code: "OPENAI_KEY_MISSING",
+        message:
+            "Add an OpenAI API key in Preferences > Integrations before explaining branch changes."
+                .to_string(),
+    })?;
+    let model = validate_openai_model(model)?;
+    let (base, context) = build_branch_explain_context(&repo, &branch).await?;
+    let body_text = request_openai_response_body(
+        &api_key,
+        &model,
+        "You explain Git branch changes to a developer reviewing the branch. Return only markdown, no JSON and no code fences around the whole answer. Start with a one-paragraph summary of what the branch does, then a short bulleted list of the notable changes grouped by area. Keep it concise. Do not invent behavior, files, or intent not shown in the Git context.",
+        context,
+        1400,
+    )
+    .await?;
+
+    let body: OpenAiResponseBody =
+        serde_json::from_str(&body_text).map_err(|error| AppError::AiFailed {
+            message: "OpenAI returned an unreadable response.".to_string(),
+            detail: error.to_string(),
+        })?;
+    let markdown = extract_openai_output_text(&body).ok_or_else(|| AppError::AiFailed {
+        message: openai_missing_output_message(&body),
+        detail: truncate_display_text(&redact_secrets(&body_text), 2_000),
+    })?;
+    let markdown = markdown.trim().to_string();
+    if markdown.is_empty() {
+        return Err(AppError::AiFailed {
+            message: "OpenAI did not return an explanation.".to_string(),
+            detail: String::new(),
+        });
+    }
+
+    Ok(AiBranchExplanation {
+        branch,
+        base,
+        markdown,
+    })
 }
 
 #[tauri::command]
@@ -5253,6 +5384,18 @@ fn read_azure_devops_pat() -> CommandResult<Option<String>> {
     }
 }
 
+fn github_pat_entry() -> CommandResult<Entry> {
+    Entry::new(OPENAI_KEY_SERVICE, GITHUB_PAT_ACCOUNT).map_err(map_keyring_error)
+}
+
+fn read_github_pat() -> CommandResult<Option<String>> {
+    match github_pat_entry()?.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(error) => Err(map_keyring_error(error)),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AzureProfileResponse {
@@ -5739,6 +5882,188 @@ fn azure_provider_error(status: reqwest::StatusCode, url: &str, body: &str) -> A
         message,
         detail: format!("{url}\n{body}"),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubUserWire {
+    login: String,
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRepositoryWire {
+    id: u64,
+    name: String,
+    owner: Option<GithubOwnerWire>,
+    clone_url: Option<String>,
+    html_url: Option<String>,
+    default_branch: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubOwnerWire {
+    login: String,
+    html_url: Option<String>,
+}
+
+const GITHUB_REPOS_PER_PAGE: usize = 100;
+const GITHUB_REPOS_MAX: usize = 300;
+
+async fn list_github_repositories(local_paths: Vec<String>) -> CommandResult<ProviderRepoCatalog> {
+    let pat = read_github_pat()?.ok_or_else(|| AppError::InvalidInput {
+        code: "GITHUB_TOKEN_MISSING",
+        message:
+            "Add a GitHub Personal Access Token in Preferences > Integrations before listing GitHub repositories."
+                .to_string(),
+    })?;
+    let client = reqwest::Client::new();
+    let local_refs = local_repository_refs(local_paths).await;
+
+    let mut accounts = Vec::new();
+    let mut repositories = Vec::new();
+
+    let mut page = 1;
+    loop {
+        let url = format!(
+            "{GITHUB_API_BASE}/user/repos?per_page={GITHUB_REPOS_PER_PAGE}&sort=pushed&page={page}"
+        );
+        let github_repos: Vec<GithubRepositoryWire> = github_get_json(&client, &url, &pat).await?;
+        let page_len = github_repos.len();
+        for repo in github_repos {
+            push_github_provider_repository(&mut accounts, &mut repositories, repo, &local_refs);
+        }
+        if page_len < GITHUB_REPOS_PER_PAGE || repositories.len() >= GITHUB_REPOS_MAX {
+            break;
+        }
+        page += 1;
+    }
+
+    repositories.sort_by(|left, right| {
+        left.account_name
+            .cmp(&right.account_name)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    Ok(ProviderRepoCatalog {
+        provider: GitProvider::Github,
+        accounts,
+        projects: Vec::new(),
+        repositories,
+        refreshed_at: now_millis().to_string(),
+    })
+}
+
+fn push_github_provider_repository(
+    accounts: &mut Vec<ProviderAccount>,
+    repositories: &mut Vec<ProviderRepository>,
+    repo: GithubRepositoryWire,
+    local_refs: &[LocalRepositoryRef],
+) {
+    let owner_login = repo
+        .owner
+        .as_ref()
+        .map(|owner| owner.login.trim().to_string())
+        .filter(|login| !login.is_empty())
+        .unwrap_or_else(|| "GitHub".to_string());
+    if !accounts.iter().any(|account: &ProviderAccount| account.id == owner_login) {
+        accounts.push(ProviderAccount {
+            id: owner_login.clone(),
+            provider: GitProvider::Github,
+            name: owner_login.clone(),
+            display_name: Some(owner_login.clone()),
+            url: repo.owner.as_ref().and_then(|owner| owner.html_url.clone()),
+        });
+    }
+
+    let repo_id = repo_provider_id(
+        GitProvider::Github,
+        &owner_login,
+        "",
+        &repo.name,
+        &repo.id.to_string(),
+    );
+    if repositories.iter().any(|existing| existing.id == repo_id) {
+        return;
+    }
+    let clone_url = repo.clone_url.as_ref().map(|url| ProviderCloneUrl {
+        kind: provider_clone_url_kind(url),
+        url: url.clone(),
+        safe_url: redact_secrets(url),
+    });
+    let local_match = repo
+        .clone_url
+        .as_deref()
+        .map(|url| local_match_for_remote(url, local_refs))
+        .unwrap_or_else(|| LocalRepoMatch {
+            status: LocalRepoMatchStatus::NotCloned,
+            path: None,
+            matched_remote: None,
+        });
+    repositories.push(ProviderRepository {
+        id: repo_id,
+        provider: GitProvider::Github,
+        account_id: owner_login.clone(),
+        account_name: owner_login,
+        project_id: None,
+        project_name: None,
+        name: repo.name,
+        default_branch: repo.default_branch.as_deref().map(normalize_default_branch),
+        web_url: repo.html_url,
+        clone_url,
+        local_match,
+    });
+}
+
+async fn github_get_json<T>(client: &reqwest::Client, url: &str, pat: &str) -> CommandResult<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let response = client
+        .get(url)
+        .bearer_auth(pat)
+        .header("User-Agent", GITHUB_USER_AGENT)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|error| AppError::ProviderFailed {
+            code: "PROVIDER_REQUEST_FAILED",
+            message: "GitHub request failed.".to_string(),
+            detail: error.to_string(),
+        })?;
+    let status = response.status();
+    let body = response.text().await.map_err(|error| AppError::ProviderFailed {
+        code: "PROVIDER_REQUEST_FAILED",
+        message: "GitHub response could not be read.".to_string(),
+        detail: error.to_string(),
+    })?;
+
+    if !status.is_success() {
+        let code = if status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
+        {
+            "GITHUB_AUTH_FAILED"
+        } else {
+            "PROVIDER_REQUEST_FAILED"
+        };
+        let message = if code == "GITHUB_AUTH_FAILED" {
+            "GitHub rejected this token. Use a fine-grained or classic PAT with repo read access."
+                .to_string()
+        } else {
+            format!("GitHub returned HTTP {status}.")
+        };
+        return Err(AppError::ProviderFailed {
+            code,
+            message,
+            detail: format!("{url}\n{}", redact_secrets(&body)),
+        });
+    }
+
+    serde_json::from_str::<T>(&body).map_err(|error| AppError::ProviderFailed {
+        code: "PROVIDER_RESPONSE_INVALID",
+        message: "GitHub returned a response OpenGit could not parse.".to_string(),
+        detail: format!("{error}: {body}"),
+    })
 }
 
 async fn local_repository_refs(local_paths: Vec<String>) -> Vec<LocalRepositoryRef> {
@@ -6399,6 +6724,111 @@ async fn build_pr_context(repo: &Path) -> CommandResult<String> {
     ))
 }
 
+/// Gather the Git context for explaining `branch`: commits and diff stat against
+/// the merge-base with the branch's upstream, or with the default branch when no
+/// upstream exists. Returns the base ref used plus the prompt context.
+async fn build_branch_explain_context(repo: &Path, branch: &str) -> CommandResult<(String, String)> {
+    let upstream = run_git(
+        Some(repo),
+        vec![
+            "rev-parse".into(),
+            "--abbrev-ref".into(),
+            "--symbolic-full-name".into(),
+            format!("{branch}@{{upstream}}"),
+        ],
+    )
+    .await
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty() && value != branch);
+
+    let candidates = upstream
+        .into_iter()
+        .chain(["origin/main", "origin/master", "main", "master"].map(ToString::to_string))
+        .filter(|candidate| candidate != branch);
+
+    let mut base = None;
+    for candidate in candidates {
+        if resolve_commit_sha(repo, &candidate).await.is_ok() {
+            base = Some(candidate);
+            break;
+        }
+    }
+    let base = base.ok_or(AppError::InvalidInput {
+        code: "NO_EXPLAIN_BASE",
+        message: "Could not find an upstream, origin/main, origin/master, main, or master base to compare this branch against.".to_string(),
+    })?;
+
+    let merge_base = run_git(
+        Some(repo),
+        vec!["merge-base".into(), base.clone(), branch.to_string()],
+    )
+    .await
+    .map(|value| value.trim().to_string())
+    .map_err(|_| AppError::InvalidInput {
+        code: "NO_EXPLAIN_BASE",
+        message: format!("'{branch}' has no merge base with '{base}'."),
+    })?;
+
+    let log = run_git(
+        Some(repo),
+        vec![
+            "log".into(),
+            "--no-merges".into(),
+            "-n".into(),
+            "50".into(),
+            "--date=short".into(),
+            "--format=%h %ad %an: %s".into(),
+            format!("{merge_base}..{branch}"),
+        ],
+    )
+    .await?;
+    if log.trim().is_empty() {
+        return invalid(
+            "NO_BRANCH_COMMITS",
+            &format!("'{branch}' has no commits ahead of '{base}'."),
+        );
+    }
+    let stat = run_git(
+        Some(repo),
+        vec![
+            "diff".into(),
+            "--stat".into(),
+            merge_base.clone(),
+            branch.to_string(),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    let name_status = run_git(
+        Some(repo),
+        vec![
+            "diff".into(),
+            "--name-status".into(),
+            "--find-renames".into(),
+            merge_base,
+            branch.to_string(),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+
+    let repo_name = repo
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("repository");
+    let stat = truncate_for_prompt(&stat, MAX_STAGED_DIFF_CHARS / 2);
+
+    let context = format!(
+        "Repository: {repo_name}\nBranch: {branch}\nBase: {base}\n\nCommits on the branch (newest first, up to 50):\n{}\n\nChanged files:\n{}\n\nDiff stat{}:\n{}",
+        log.trim(),
+        name_status.trim(),
+        if stat.truncated { " (truncated)" } else { "" },
+        stat.text.trim()
+    );
+    Ok((base, context))
+}
+
 async fn pr_base_ref(repo: &Path) -> CommandResult<String> {
     let upstream = run_git(
         Some(repo),
@@ -6873,11 +7303,15 @@ pub fn run() {
             azure_devops_status,
             azure_devops_save_pat,
             azure_devops_clear_pat,
+            github_status,
+            github_save_pat,
+            github_clear_pat,
             provider_accounts_status,
             provider_repos_list,
             ai_commit_message_generate,
             ai_branch_name_generate,
             ai_pr_description_generate,
+            ai_branch_explain,
             git_undo_restore,
             git_branch_create,
             git_branch_checkout,
