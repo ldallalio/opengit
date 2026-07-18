@@ -1,18 +1,24 @@
 # OpenGit
 
-OpenGit is a local-first, cross-platform Git desktop client built with Tauri, React, TypeScript, and Rust.
+OpenGit is a local-first, cross-platform Git desktop client built with Tauri,
+React, TypeScript, and Rust. Commit graph, hunk/line-level staging,
+side-by-side diffs, a merge conflict resolver, safety snapshots before
+destructive operations, and first-class Azure DevOps support alongside
+GitHub and GitLab.
 
-It is an original open-source project for developers who want a polished Git GUI for everyday local repository work without a subscription. OpenGit is not affiliated with, endorsed by, or derived from GitKraken or any other commercial Git client.
+Works fully offline. No telemetry, no account, no subscription.
 
-> Status: alpha. OpenGit is usable for local workflows, but it is not production-stable yet and signed binary releases are not available.
+OpenGit is not affiliated with, endorsed by, or derived from GitKraken or any other commercial Git client.
 
-## Releases
+## Download
 
-The first public alpha is published as a source-only prerelease:
+- **[Official signed builds](https://opengit-site.vercel.app)** — macOS (signed & notarized), Windows, and Linux. Pay once ($15), updates are free forever.
+- **Build from source** — the code is MIT licensed and free for anyone; see [Development](#development) below. Linux builds are always free either way.
+- **[Latest GitHub release](https://github.com/ldallalio/opengit/releases/latest)** — raw installers if you'd rather not go through the site.
 
-- [OpenGit v0.1.0-alpha.1](https://github.com/ldallalio/opengit/releases/tag/v0.1.0-alpha.1)
+## Support the project
 
-Future `v*` tags run the Tauri release workflow and create draft prereleases with platform artifacts. Those artifacts are Tauri-updater-signed, but macOS notarization and Windows code signing still require developer signing credentials before they should be treated as end-user production installers.
+If you're building from source and want to chip in anyway: [donate](https://donate.stripe.com/3cIeVebJCf1p40s6rN93y01).
 
 ## Features
 
