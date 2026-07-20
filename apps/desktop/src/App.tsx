@@ -7855,13 +7855,21 @@ function branchMenuItems(
       disabled: !target.isCurrent || target.isTag || target.isRemote || target.isCommitOnly,
       hint: target.isCommitOnly ? "not a branch" : !target.isCurrent ? "checkout first" : undefined
     },
-    {
-      type: "item",
-      action: "push",
-      label: "Push",
-      disabled: !localBranch || !hasRemote,
-      hint: !hasRemote ? "add remote first" : !localBranch ? `not a local ${branchRef}` : undefined
-    },
+    target.isTag
+      ? {
+          type: "item",
+          action: "push-tag",
+          label: `Push tag ${target.name}`,
+          disabled: !hasRemote,
+          hint: !hasRemote ? "add remote first" : undefined
+        }
+      : {
+          type: "item",
+          action: "push",
+          label: "Push",
+          disabled: !localBranch || !hasRemote,
+          hint: !hasRemote ? "add remote first" : !localBranch ? `not a local ${branchRef}` : undefined
+        },
     {
       type: "item",
       action: "set-upstream",
@@ -7948,17 +7956,6 @@ function branchMenuItems(
     { type: "item", action: "copy-name", label: target.isTag ? "Copy tag name" : "Copy branch name" },
     { type: "item", action: "copy-sha", label: "Copy commit sha", disabled: !target.commitSha },
     { type: "separator", key: "tags" },
-    ...(target.isTag
-      ? ([
-          {
-            type: "item",
-            action: "push-tag",
-            label: `Push tag ${target.name}`,
-            disabled: !hasRemote,
-            hint: !hasRemote ? "add remote first" : undefined
-          }
-        ] satisfies BranchMenuItem[])
-      : []),
     { type: "item", action: "create-tag", label: "Create tag here", disabled: target.isUnborn },
     { type: "item", action: "create-annotated-tag", label: "Create annotated tag here", disabled: target.isUnborn }
   ];
