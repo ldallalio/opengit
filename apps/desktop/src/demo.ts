@@ -67,6 +67,21 @@ export const demoSnapshot: RepoSnapshot = {
       isProtected: false
     }
   ],
+  tags: [
+    {
+      name: "v1.2.0",
+      fullRef: "refs/tags/v1.2.0",
+      commitSha: "f5a84c5a962f9adf6cf3e6de1ef4b3f4ad30ec57",
+      annotated: true,
+      subject: "Release 1.2.0"
+    },
+    {
+      name: "v1.1.0",
+      fullRef: "refs/tags/v1.1.0",
+      commitSha: "aa8c8f252648b7efba0cb128e211c65f49ac1411",
+      annotated: false
+    }
+  ],
   remotes: [
     {
       name: "origin",

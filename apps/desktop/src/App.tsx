@@ -24,6 +24,7 @@ import type {
   ProviderRepository,
   ParallelLane,
   RepoSnapshot,
+  Tag,
   UndoSnapshot
 } from "@opengit/core";
 import { Button, EmptyState, IconButton, Panel } from "@opengit/ui";
@@ -68,6 +69,7 @@ import {
   Sparkles,
   SquarePen,
   Sun,
+  Tag as TagIcon,
   Terminal,
   Trash2,
   UploadCloud,
@@ -195,6 +197,7 @@ type ResizeTarget =
   | "bottom"
   | "sidebarBranches"
   | "sidebarInspector"
+  | "sidebarTags"
   | "sidebarRemotes"
   | "sidebarStashes"
   | "detailSelection"
@@ -205,6 +208,7 @@ type LayoutState = {
   bottomHeight: number;
   sidebarBranchesHeight: number;
   sidebarInspectorHeight: number;
+  sidebarTagsHeight: number;
   sidebarRemotesHeight: number;
   sidebarStashesHeight: number;
   detailSelectionHeight: number;
@@ -430,6 +434,7 @@ const defaultLayout: LayoutState = {
   bottomHeight: 240,
   sidebarBranchesHeight: 420,
   sidebarInspectorHeight: 270,
+  sidebarTagsHeight: 180,
   sidebarRemotesHeight: 145,
   sidebarStashesHeight: 145,
   detailSelectionHeight: 220,
@@ -947,6 +952,7 @@ export default function App() {
     "--bottom-handle-track": layout.bottomCollapsed ? "0px" : "6px",
     "--sidebar-branches-height": `${layout.sidebarBranchesHeight}px`,
     "--sidebar-inspector-height": `${layout.sidebarInspectorHeight}px`,
+    "--sidebar-tags-height": `${layout.sidebarTagsHeight}px`,
     "--sidebar-remotes-height": `${layout.sidebarRemotesHeight}px`,
     "--sidebar-stashes-height": `${layout.sidebarStashesHeight}px`,
     "--detail-selection-height": `${layout.detailSelectionHeight}px`,
@@ -2244,7 +2250,7 @@ export default function App() {
     const startY = event.clientY;
     const initial = layout;
     const resizeClass =
-      target === "bottom" || target === "sidebarBranches" || target === "sidebarInspector" || target === "sidebarRemotes" || target === "sidebarStashes" || target === "detailSelection"
+      target === "bottom" || target === "sidebarBranches" || target === "sidebarInspector" || target === "sidebarTags" || target === "sidebarRemotes" || target === "sidebarStashes" || target === "detailSelection"
         ? "resizing-layout-horizontal"
         : "resizing-layout-vertical";
 
@@ -2259,6 +2265,7 @@ export default function App() {
         if (target === "bottom") next.bottomHeight = clamp(initial.bottomHeight - deltaY, 150, 520);
         if (target === "sidebarBranches") next.sidebarBranchesHeight = clamp(initial.sidebarBranchesHeight + deltaY, 180, 760);
         if (target === "sidebarInspector") next.sidebarInspectorHeight = clamp(initial.sidebarInspectorHeight + deltaY, 180, 760);
+        if (target === "sidebarTags") next.sidebarTagsHeight = clamp(initial.sidebarTagsHeight + deltaY, 80, 500);
         if (target === "sidebarRemotes") next.sidebarRemotesHeight = clamp(initial.sidebarRemotesHeight + deltaY, 80, 360);
         if (target === "sidebarStashes") next.sidebarStashesHeight = clamp(initial.sidebarStashesHeight + deltaY, 80, 360);
         if (target === "detailSelection") next.detailSelectionHeight = clamp(initial.detailSelectionHeight + deltaY, 120, 460);
@@ -4455,11 +4462,14 @@ function Sidebar({
   discardSelectedLane: () => void;
   materializeSelectedLane: () => void;
 }) {
+  const [tagFilter, setTagFilter] = useState("");
   const branchRows = snapshot ? filterBranches(displayBranches(snapshot), sidebarBranchFilter) : [];
   const selectedStack = snapshot?.branchStacks.find((stack) => stack.id === selectedStackId) ?? null;
   const selectedLane = snapshot?.parallelLanes.find((lane) => lane.id === selectedLaneId) ?? null;
   const localBranches = branchRows.filter((branch) => !branch.isRemote);
   const remoteBranches = branchRows.filter((branch) => branch.isRemote);
+  const normalizedTagFilter = tagFilter.trim().toLowerCase();
+  const tagRows = (snapshot?.tags ?? []).filter((tag) => tag.name.toLowerCase().includes(normalizedTagFilter));
 
   return (
     <aside className="sidebar">
@@ -4656,6 +4666,70 @@ function Sidebar({
         </div>
       </Panel>
 
+      <Panel
+        title="Tags"
+        className="sidebar-tags-panel"
+        defaultCollapsed={!snapshot || snapshot.tags.length === 0}
+        actions={<TagIcon size={15} />}
+      >
+        {snapshot && snapshot.tags.length > 0 ? (
+          <>
+            <div className="branch-filter">
+              <Search size={13} />
+              <input
+                value={tagFilter}
+                onChange={(event) => setTagFilter(event.target.value)}
+                placeholder="Filter tags"
+                aria-label="Filter tags"
+              />
+            </div>
+            <div className="nav-list">
+              {tagRows.length > 0 ? (
+                tagRows.map((tag) => {
+                  const menuTarget = targetFromTag(tag);
+                  return (
+                    <div
+                      key={tag.fullRef}
+                      className={clsx("nav-row", (selectedBranchRef === tag.fullRef || selectedBranchRef === tag.name) && "focused")}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        openBranchMenu(menuTarget, event);
+                      }}
+                    >
+                      <button type="button" onClick={() => selectBranch(menuTarget)} title={tag.subject ?? tag.name}>
+                        <TagIcon size={13} />
+                        <span>{tag.name}</span>
+                        {tag.annotated && <small>annotated</small>}
+                      </button>
+                      <span className="nav-row-actions">
+                        <IconButton label={`${tag.name} actions`} onClick={(event) => openBranchMenu(menuTarget, event)}>
+                          <MoreHorizontal size={13} />
+                        </IconButton>
+                      </span>
+                    </div>
+                  );
+                })
+              ) : (
+                <EmptyState>
+                  <TagIcon size={24} />
+                  <span>No tags match</span>
+                </EmptyState>
+              )}
+            </div>
+          </>
+        ) : (
+          <EmptyState>
+            <TagIcon size={24} />
+            <span>No tags</span>
+          </EmptyState>
+        )}
+      </Panel>
+      <ResizeHandle
+        className="sidebar-section-resize sidebar-tags-resize"
+        label="Resize tags section"
+        orientation="horizontal"
+        onPointerDown={(event) => startResize("sidebarTags", event)}
+      />
       <Panel title="Remotes" className="sidebar-remotes-panel" defaultCollapsed actions={<Boxes size={15} />}>
         <div className="remote-create">
           <input value={remoteName} onChange={(event) => setRemoteName(event.target.value)} aria-label="Remote name" />
@@ -8086,6 +8160,21 @@ function targetFromBranch(branch: DisplayBranch, source: BranchMenuTarget["sourc
     isRemote: branch.isRemote,
     isTag: false,
     isUnborn: branch.isUnborn
+  };
+}
+
+function targetFromTag(tag: Tag): BranchMenuTarget {
+  return {
+    name: tag.name,
+    fullRef: tag.fullRef,
+    kind: "tag",
+    source: "sidebar",
+    commitSha: tag.commitSha,
+    isCurrent: false,
+    isProtected: false,
+    isRemote: false,
+    isTag: true,
+    isUnborn: false
   };
 }
 
