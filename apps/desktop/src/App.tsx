@@ -97,6 +97,9 @@ import {
   createStackChild,
   createTag,
   pushTag,
+  deleteTag,
+  deleteRemoteTag,
+  annotateTag,
   deleteBranch,
   commitLane,
   discardLane,
@@ -349,7 +352,10 @@ type BranchMenuAction =
   | "pin-left"
   | "solo"
   | "create-tag"
-  | "create-annotated-tag";
+  | "create-annotated-tag"
+  | "annotate-tag"
+  | "delete-tag"
+  | "delete-remote-tag";
 type BranchMenuItem =
   | { type: "separator"; key: string }
   | { type: "item"; action: BranchMenuAction; label: string; disabled?: boolean; danger?: boolean; hint?: string };
@@ -2184,6 +2190,40 @@ export default function App() {
           ? (await promptText({ title: "Tag message", label: `Annotation for '${tagName.trim()}'`, defaultValue: tagName.trim() }))?.trim()
           : undefined;
       runBranchTargetOperation("Create tag", (repo) => createTag(repo, tagName.trim(), target.commitSha ?? target.name, message));
+      return;
+    }
+
+    if (action === "delete-tag") {
+      runBranchTargetOperation("Delete tag", (repo) => deleteTag(repo, target.name), `Delete tag '${target.name}'?`);
+      return;
+    }
+
+    if (action === "delete-remote-tag") {
+      if (!remote) {
+        setBranchMenu(null);
+        setError("Add a remote before deleting a remote tag.");
+        return;
+      }
+      runBranchTargetOperation(
+        "Delete remote tag",
+        (repo) => deleteRemoteTag(repo, remote.name, target.name),
+        `Delete tag '${target.name}' from '${remote.name}'? This removes it for everyone on the remote.`
+      );
+      return;
+    }
+
+    if (action === "annotate-tag") {
+      setBranchMenu(null);
+      const message = (
+        await promptText({
+          title: "Annotate tag",
+          label: `Annotation for '${target.name}'`,
+          placeholder: "Release notes or context",
+          confirmLabel: "Annotate"
+        })
+      )?.trim();
+      if (!message) return;
+      runBranchTargetOperation("Annotate tag", (repo) => annotateTag(repo, target.name, target.commitSha ?? target.name, message));
       return;
     }
 
@@ -7930,14 +7970,21 @@ function branchMenuItems(
       disabled: !localBranch,
       hint: !localBranch ? `not a local ${branchRef}` : undefined
     },
-    {
-      type: "item",
-      action: "delete",
-      label: `Delete ${target.name}`,
-      danger: true,
-      disabled: !canDelete,
-      hint: target.isCurrent ? "current branch" : target.isProtected ? "protected branch" : !localBranch ? `not a local ${branchRef}` : undefined
-    },
+    target.isTag
+      ? {
+          type: "item",
+          action: "delete-tag",
+          label: `Delete tag ${target.name}`,
+          danger: true
+        }
+      : {
+          type: "item",
+          action: "delete",
+          label: `Delete ${target.name}`,
+          danger: true,
+          disabled: !canDelete,
+          hint: target.isCurrent ? "current branch" : target.isProtected ? "protected branch" : !localBranch ? `not a local ${branchRef}` : undefined
+        },
     ...(options?.providerLinks
       ? ([
           { type: "separator", key: "provider" },
@@ -7968,6 +8015,19 @@ function branchMenuItems(
     { type: "item", action: "copy-name", label: target.isTag ? "Copy tag name" : "Copy branch name" },
     { type: "item", action: "copy-sha", label: "Copy commit sha", disabled: !target.commitSha },
     { type: "separator", key: "tags" },
+    ...(target.isTag
+      ? ([
+          { type: "item", action: "annotate-tag", label: `Annotate tag ${target.name}` },
+          {
+            type: "item",
+            action: "delete-remote-tag",
+            label: `Delete tag ${target.name} from remote`,
+            danger: true,
+            disabled: !hasRemote,
+            hint: !hasRemote ? "add remote first" : undefined
+          }
+        ] satisfies BranchMenuItem[])
+      : []),
     { type: "item", action: "create-tag", label: "Create tag here", disabled: target.isUnborn },
     { type: "item", action: "create-annotated-tag", label: "Create annotated tag here", disabled: target.isUnborn }
   ];
@@ -8006,7 +8066,10 @@ function menuPendingLabel(action: BranchMenuAction) {
     "pin-left": "Pin to Left",
     solo: "Solo",
     "create-tag": "Create tag",
-    "create-annotated-tag": "Create annotated tag"
+    "create-annotated-tag": "Create annotated tag",
+    "annotate-tag": "Annotate tag",
+    "delete-tag": "Delete tag",
+    "delete-remote-tag": "Delete remote tag"
   };
   return labels[action];
 }

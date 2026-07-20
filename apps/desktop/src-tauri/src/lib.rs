@@ -2849,6 +2849,62 @@ async fn git_push_tag(
 }
 
 #[tauri::command]
+async fn git_tag_delete(repo_path: String, name: String) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&name, "tag name")?;
+    run_git_with_safety_snapshot(&repo, "before tag delete", vec!["tag".into(), "-d".into(), name]).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_tag_delete_remote(
+    repo_path: String,
+    remote: Option<String>,
+    name: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&name, "tag name")?;
+    let remote_name = remote
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "origin".into());
+    validate_ref_arg(&remote_name, "remote name")?;
+
+    let refspec = format!("refs/tags/{name}");
+    create_safety_snapshot(&repo, "before delete remote tag").await?;
+    run_git(Some(&repo), vec!["push".into(), remote_name, "--delete".into(), refspec]).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
+async fn git_tag_annotate(
+    repo_path: String,
+    name: String,
+    target: String,
+    message: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&name, "tag name")?;
+    validate_ref_arg(&target, "tag target")?;
+    if message.trim().is_empty() {
+        return invalid("INVALID_MESSAGE", "Annotation message is required.");
+    }
+
+    // -f re-creates the tag at the same commit with an annotation, so a
+    // lightweight tag becomes annotated (or an existing message is replaced).
+    let args = vec![
+        "tag".into(),
+        "-a".into(),
+        "-f".into(),
+        name,
+        target,
+        "-m".into(),
+        message,
+    ];
+    run_git_with_safety_snapshot(&repo, "before tag annotate", args).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
 async fn git_remote_add(
     repo_path: String,
     name: String,
@@ -7589,6 +7645,9 @@ pub fn run() {
             git_operation_continue,
             git_operation_abort,
             git_tag_create,
+            git_tag_delete,
+            git_tag_delete_remote,
+            git_tag_annotate,
             git_push,
             git_push_tag,
             git_remote_add,
