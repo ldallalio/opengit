@@ -387,6 +387,15 @@ export const createTag = (repoPath: string, name: string, target: string, messag
 export const pushTag = (repoPath: string, remote: string, tag: string) =>
   call<RepoSnapshot>("git_push_tag", { repoPath, remote, tag }, demoSnapshot);
 
+export const deleteTag = (repoPath: string, name: string) =>
+  call<RepoSnapshot>("git_tag_delete", { repoPath, name }, demoSnapshot);
+
+export const deleteRemoteTag = (repoPath: string, remote: string, name: string) =>
+  call<RepoSnapshot>("git_tag_delete_remote", { repoPath, remote, name }, demoSnapshot);
+
+export const annotateTag = (repoPath: string, name: string, target: string, message: string) =>
+  call<RepoSnapshot>("git_tag_annotate", { repoPath, name, target, message }, demoSnapshot);
+
 export const stashPush = (repoPath: string, message: string) =>
   call<RepoSnapshot>("git_stash_push", { repoPath, message }, demoSnapshot);
 
