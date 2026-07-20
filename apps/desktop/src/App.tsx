@@ -96,6 +96,7 @@ import {
   createStack,
   createStackChild,
   createTag,
+  pushTag,
   deleteBranch,
   commitLane,
   discardLane,
@@ -319,6 +320,7 @@ type BranchExplainState = {
 type BranchMenuAction =
   | "pull"
   | "push"
+  | "push-tag"
   | "set-upstream"
   | "merge"
   | "rebase"
@@ -2024,6 +2026,16 @@ export default function App() {
         return;
       }
       runBranchTargetOperation("Push branch", (repo) => pushRepo(repo, remote.name, target.name, false, !branchRecord?.upstream));
+      return;
+    }
+
+    if (action === "push-tag") {
+      if (!remote) {
+        setBranchMenu(null);
+        setError("Add a remote before pushing.");
+        return;
+      }
+      runBranchTargetOperation("Push tag", (repo) => pushTag(repo, remote.name, target.name));
       return;
     }
 
@@ -7936,6 +7948,17 @@ function branchMenuItems(
     { type: "item", action: "copy-name", label: target.isTag ? "Copy tag name" : "Copy branch name" },
     { type: "item", action: "copy-sha", label: "Copy commit sha", disabled: !target.commitSha },
     { type: "separator", key: "tags" },
+    ...(target.isTag
+      ? ([
+          {
+            type: "item",
+            action: "push-tag",
+            label: `Push tag ${target.name}`,
+            disabled: !hasRemote,
+            hint: !hasRemote ? "add remote first" : undefined
+          }
+        ] satisfies BranchMenuItem[])
+      : []),
     { type: "item", action: "create-tag", label: "Create tag here", disabled: target.isUnborn },
     { type: "item", action: "create-annotated-tag", label: "Create annotated tag here", disabled: target.isUnborn }
   ];
@@ -7945,6 +7968,7 @@ function menuPendingLabel(action: BranchMenuAction) {
   const labels: Record<BranchMenuAction, string> = {
     pull: "Pull",
     push: "Push",
+    "push-tag": "Push tag",
     "set-upstream": "Set upstream",
     merge: "Merge",
     rebase: "Rebase",

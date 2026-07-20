@@ -2829,6 +2829,26 @@ async fn git_push(
 }
 
 #[tauri::command]
+async fn git_push_tag(
+    repo_path: String,
+    remote: Option<String>,
+    tag: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&tag, "tag name")?;
+    let remote_name = remote
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "origin".into());
+    validate_ref_arg(&remote_name, "remote name")?;
+
+    let refspec = format!("refs/tags/{tag}");
+    let args = vec!["push".into(), remote_name, refspec];
+    create_safety_snapshot(&repo, "before push tag").await?;
+    run_git(Some(&repo), args).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
 async fn git_remote_add(
     repo_path: String,
     name: String,
@@ -7570,6 +7590,7 @@ pub fn run() {
             git_operation_abort,
             git_tag_create,
             git_push,
+            git_push_tag,
             git_remote_add,
             git_stash_push,
             git_stash_apply,

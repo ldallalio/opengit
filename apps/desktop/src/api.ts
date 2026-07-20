@@ -384,6 +384,9 @@ export const revertCommit = (repoPath: string, commitSha: string) =>
 export const createTag = (repoPath: string, name: string, target: string, message?: string) =>
   call<RepoSnapshot>("git_tag_create", { repoPath, name, target, message }, demoSnapshot);
 
+export const pushTag = (repoPath: string, remote: string, tag: string) =>
+  call<RepoSnapshot>("git_push_tag", { repoPath, remote, tag }, demoSnapshot);
+
 export const stashPush = (repoPath: string, message: string) =>
   call<RepoSnapshot>("git_stash_push", { repoPath, message }, demoSnapshot);
 
