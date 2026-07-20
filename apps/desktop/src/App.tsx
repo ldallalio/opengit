@@ -96,6 +96,7 @@ import {
   createStack,
   createStackChild,
   createTag,
+  pushTag,
   deleteBranch,
   commitLane,
   discardLane,
@@ -319,6 +320,7 @@ type BranchExplainState = {
 type BranchMenuAction =
   | "pull"
   | "push"
+  | "push-tag"
   | "set-upstream"
   | "merge"
   | "rebase"
@@ -2024,6 +2026,16 @@ export default function App() {
         return;
       }
       runBranchTargetOperation("Push branch", (repo) => pushRepo(repo, remote.name, target.name, false, !branchRecord?.upstream));
+      return;
+    }
+
+    if (action === "push-tag") {
+      if (!remote) {
+        setBranchMenu(null);
+        setError("Add a remote before pushing.");
+        return;
+      }
+      runBranchTargetOperation("Push tag", (repo) => pushTag(repo, remote.name, target.name));
       return;
     }
 
@@ -7843,13 +7855,21 @@ function branchMenuItems(
       disabled: !target.isCurrent || target.isTag || target.isRemote || target.isCommitOnly,
       hint: target.isCommitOnly ? "not a branch" : !target.isCurrent ? "checkout first" : undefined
     },
-    {
-      type: "item",
-      action: "push",
-      label: "Push",
-      disabled: !localBranch || !hasRemote,
-      hint: !hasRemote ? "add remote first" : !localBranch ? `not a local ${branchRef}` : undefined
-    },
+    target.isTag
+      ? {
+          type: "item",
+          action: "push-tag",
+          label: `Push tag ${target.name}`,
+          disabled: !hasRemote,
+          hint: !hasRemote ? "add remote first" : undefined
+        }
+      : {
+          type: "item",
+          action: "push",
+          label: "Push",
+          disabled: !localBranch || !hasRemote,
+          hint: !hasRemote ? "add remote first" : !localBranch ? `not a local ${branchRef}` : undefined
+        },
     {
       type: "item",
       action: "set-upstream",
@@ -7945,6 +7965,7 @@ function menuPendingLabel(action: BranchMenuAction) {
   const labels: Record<BranchMenuAction, string> = {
     pull: "Pull",
     push: "Push",
+    "push-tag": "Push tag",
     "set-upstream": "Set upstream",
     merge: "Merge",
     rebase: "Rebase",
