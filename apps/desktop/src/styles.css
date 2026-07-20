@@ -765,6 +765,8 @@ textarea {
     var(--sidebar-inspector-track, minmax(220px, var(--sidebar-inspector-height, 270px)))
     var(--sidebar-inspector-resize-track, 6px)
     var(--sidebar-workflows-track, 32px)
+    minmax(32px, var(--sidebar-tags-height, 180px))
+    var(--sidebar-tags-resize-track, 6px)
     minmax(32px, var(--sidebar-remotes-height, 145px))
     var(--sidebar-remotes-resize-track, 6px)
     minmax(32px, var(--sidebar-stashes-height, 145px))
@@ -824,6 +826,11 @@ textarea {
   --sidebar-branches-resize-track: 0px;
 }
 
+.sidebar:has(.sidebar-tags-panel.og-panel-collapsed) {
+  --sidebar-tags-height: 32px;
+  --sidebar-tags-resize-track: 0px;
+}
+
 .sidebar:has(.sidebar-remotes-panel.og-panel-collapsed) {
   --sidebar-remotes-height: 32px;
   --sidebar-remotes-resize-track: 0px;
@@ -849,6 +856,7 @@ textarea {
 
 .sidebar:has(.sidebar-branches-panel.og-panel-collapsed) .sidebar-branches-resize,
 .sidebar:has(.branch-inspector-panel.og-panel-collapsed) .sidebar-inspector-resize,
+.sidebar:has(.sidebar-tags-panel.og-panel-collapsed) .sidebar-tags-resize,
 .sidebar:has(.sidebar-remotes-panel.og-panel-collapsed) .sidebar-remotes-resize,
 .sidebar:has(.sidebar-stashes-panel.og-panel-collapsed) .sidebar-stashes-resize {
   display: none;

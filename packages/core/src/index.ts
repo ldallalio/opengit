@@ -118,6 +118,14 @@ export interface Branch {
   isProtected: boolean;
 }
 
+export interface Tag {
+  name: string;
+  fullRef: string;
+  commitSha: string;
+  annotated: boolean;
+  subject?: string;
+}
+
 export interface BranchInspection {
   branch: Branch;
   kind: "local" | "remote" | "tag" | "unknown";
@@ -350,6 +358,7 @@ export interface RepoSnapshot {
   /** True when `changes` was capped by the backend to keep the UI responsive. */
   changesTruncated?: boolean;
   branches: Branch[];
+  tags: Tag[];
   remotes: Remote[];
   stashes: Stash[];
   commits: Commit[];

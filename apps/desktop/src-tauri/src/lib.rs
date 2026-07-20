@@ -201,6 +201,17 @@ struct Branch {
     is_protected: bool,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Tag {
+    name: String,
+    full_ref: String,
+    /// The commit the tag ultimately points at (dereferenced for annotated tags).
+    commit_sha: String,
+    annotated: bool,
+    subject: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BranchInspection {
@@ -499,6 +510,7 @@ struct RepoSnapshot {
     /// True when `changes` was capped at `MAX_CHANGE_ENTRIES` to keep the UI responsive.
     changes_truncated: bool,
     branches: Vec<Branch>,
+    tags: Vec<Tag>,
     remotes: Vec<Remote>,
     stashes: Vec<Stash>,
     commits: Vec<Commit>,
@@ -3272,6 +3284,7 @@ async fn build_snapshot(repo: &Path, history_limit: Option<u32>) -> CommandResul
         branch_status.ahead,
         branch_status.behind,
     );
+    let tags = list_tags(repo).await;
     let stashes = parse_stashes(
         &run_git(
             Some(repo),
@@ -3324,6 +3337,7 @@ async fn build_snapshot(repo: &Path, history_limit: Option<u32>) -> CommandResul
         total_changes,
         changes_truncated,
         branches,
+        tags,
         remotes,
         stashes,
         commits,
@@ -5079,6 +5093,45 @@ fn file_change(
         binary: false,
         rename_score: None,
     }
+}
+
+async fn list_tags(repo: &Path) -> Vec<Tag> {
+    // %(*objectname) is the dereferenced commit for annotated tags and empty
+    // for lightweight ones, so fall back to %(objectname) in that case.
+    let raw = run_git(
+        Some(repo),
+        vec![
+            "for-each-ref".into(),
+            "--sort=-creatordate".into(),
+            "--format=%(refname)%1f%(objecttype)%1f%(objectname)%1f%(*objectname)%1f%(subject)".into(),
+            "refs/tags".into(),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+
+    raw.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\u{1f}');
+            let full_ref = parts.next()?.to_string();
+            if full_ref.is_empty() {
+                return None;
+            }
+            let object_type = parts.next().unwrap_or_default();
+            let object_name = parts.next().unwrap_or_default().to_string();
+            let deref_name = parts.next().unwrap_or_default().to_string();
+            let subject = optional_string(parts.next().unwrap_or_default());
+            let annotated = object_type == "tag";
+            let commit_sha = if deref_name.is_empty() { object_name } else { deref_name };
+            Some(Tag {
+                name: full_ref.replace("refs/tags/", ""),
+                full_ref,
+                commit_sha,
+                annotated,
+                subject,
+            })
+        })
+        .collect()
 }
 
 fn parse_branches(raw: &str, ahead: i32, behind: i32) -> Vec<Branch> {
