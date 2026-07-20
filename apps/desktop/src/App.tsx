@@ -564,8 +564,19 @@ function repoSnapshotSignature(snapshot: RepoSnapshot) {
   });
 }
 
+// "(detached)" (and the "(HEAD detached at ...)" branch-list label) are
+// placeholders git reports for a detached HEAD, not resolvable refs. Passing
+// them to git_branch_inspect yields "Branch or ref could not be found", so
+// callers must fall back to a real ref (the head SHA) when detached.
+function isInspectableRef(ref: string | null | undefined): ref is string {
+  return !!ref && ref !== "(detached)" && ref !== "HEAD" && !ref.startsWith("(HEAD detached");
+}
+
 function defaultBranchRef(snapshot: RepoSnapshot) {
-  return snapshot.currentBranch ?? snapshot.branches.find((branch) => branch.isCurrent)?.fullRef ?? snapshot.branches[0]?.fullRef ?? null;
+  if (isInspectableRef(snapshot.currentBranch)) return snapshot.currentBranch;
+  const currentRow = snapshot.branches.find((branch) => branch.isCurrent);
+  if (isInspectableRef(currentRow?.fullRef)) return currentRow.fullRef;
+  return snapshot.repository.head ?? snapshot.branches[0]?.fullRef ?? null;
 }
 
 function snapshotHasBranchRef(snapshot: RepoSnapshot, ref: string) {
@@ -750,7 +761,7 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<RepoSnapshot | null>(() => (runningInTauri ? null : demoSnapshot));
   const [selectedCommit, setSelectedCommit] = useState<Commit | null>(snapshot?.commits[0] ?? null);
   const [worktreeSelected, setWorktreeSelected] = useState(false);
-  const [selectedBranchRef, setSelectedBranchRef] = useState<string | null>(snapshot?.currentBranch ?? null);
+  const [selectedBranchRef, setSelectedBranchRef] = useState<string | null>(snapshot ? defaultBranchRef(snapshot) : null);
   const [branchInspection, setBranchInspection] = useState<BranchInspection | null>(null);
   const [branchInspectionLoading, setBranchInspectionLoading] = useState(false);
   const [branchInspectionError, setBranchInspectionError] = useState<string | null>(null);
@@ -1175,7 +1186,7 @@ export default function App() {
       setSelectedLaneId(snapshot.parallelLanes[0]?.id ?? null);
     }
     if (!selectedBranchRef) {
-      setSelectedBranchRef(snapshot.currentBranch ?? snapshot.branches.find((branch) => branch.isCurrent)?.fullRef ?? snapshot.branches[0]?.fullRef ?? null);
+      setSelectedBranchRef(defaultBranchRef(snapshot));
     }
   }, [snapshot, selectedBranchRef, selectedLaneId, selectedStackId]);
 
@@ -1814,7 +1825,8 @@ export default function App() {
   };
 
   const selectBranchForInspection = (target: BranchMenuTarget | DisplayBranch | Branch) => {
-    setSelectedBranchRef(branchRefForInspection(target));
+    const ref = branchRefForInspection(target);
+    setSelectedBranchRef(isInspectableRef(ref) ? ref : snapshot?.repository.head ?? null);
   };
 
   const checkoutInspectedBranch = (inspection: BranchInspection) => {
