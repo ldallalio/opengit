@@ -375,7 +375,7 @@ type PreferenceSection =
   | "terminal"
   | "experimental";
 
-const defaultPath = localStorage.getItem("opengit:lastPath") ?? "/Users/logandallalio/Documents/OpenGit";
+const defaultPath = localStorage.getItem("opengit:lastPath") ?? "";
 const graphColors = ["#58a6ff", "#b388ff", "#3fb950", "#ff7b72", "#e3b341", "#d2a8ff", "#79c0ff", "#a5d6ff", "#f0883e", "#8b949e"];
 const graphLaneWidth = 18;
 const graphRowHeight = 36;
@@ -619,7 +619,7 @@ function loadHistoryFilters(): HistoryFilters {
 }
 
 function loadDefaultCloneRoot() {
-  return localStorage.getItem(cloneRootStorageKey) ?? "/Users/logandallalio/Documents";
+  return localStorage.getItem(cloneRootStorageKey) ?? "";
 }
 
 function loadProviderLocatedPaths() {
