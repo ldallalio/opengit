@@ -314,6 +314,9 @@ export const checkoutRemoteBranch = (repoPath: string, remoteRef: string) =>
 export const deleteBranch = (repoPath: string, name: string, force: boolean) =>
   call<RepoSnapshot>("git_branch_delete", { repoPath, name, force }, demoSnapshot);
 
+export const deleteRemoteBranch = (repoPath: string, remote: string, name: string) =>
+  call<RepoSnapshot>("git_branch_delete_remote", { repoPath, remote, name }, demoSnapshot);
+
 export const renameBranch = (repoPath: string, oldName: string, newName: string) =>
   call<RepoSnapshot>("git_branch_rename", { repoPath, oldName, newName }, demoSnapshot);
 

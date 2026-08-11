@@ -103,6 +103,7 @@ import {
   deleteRemoteTag,
   annotateTag,
   deleteBranch,
+  deleteRemoteBranch,
   commitLane,
   discardLane,
   discardPaths,
@@ -315,7 +316,12 @@ type ConfirmRequest = {
   message: string;
   title?: string;
   confirmLabel?: string;
+  // When set, the dialog renders an opt-in checkbox and reports its state back
+  // through `confirmActionWithCheckbox`. Plain `confirmAction` ignores it.
+  checkboxLabel?: string;
+  checkboxDefault?: boolean;
 };
+type ConfirmResult = { confirmed: boolean; checked: boolean };
 type AiProviderPreference = "auto" | "openai" | "claude";
 type BranchExplainState = {
   branch: string;
@@ -836,7 +842,7 @@ export default function App() {
   const [promptRequest, setPromptRequest] = useState<PromptRequest | null>(null);
   const promptResolverRef = useRef<((value: string | null) => void) | null>(null);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
-  const confirmResolverRef = useRef<((value: boolean) => void) | null>(null);
+  const confirmResolverRef = useRef<((value: ConfirmResult) => void) | null>(null);
   const [pushRecovery, setPushRecovery] = useState<PushRecoveryState | null>(null);
   const [lockRecovery, setLockRecovery] = useState<LockRecoveryState | null>(null);
   const [recentRepos, setRecentRepos] = useState<string[]>(loadRecentRepos);
@@ -1913,19 +1919,25 @@ export default function App() {
   // In-app confirm. Replaces window.confirm for the same reason as promptText:
   // Tauri's macOS WebView (WKWebView) does not implement it and returns falsy
   // without showing a dialog, so confirm-gated flows silently no-op.
-  const confirmAction = useCallback((message: string, options?: Omit<ConfirmRequest, "message">) => {
-    return new Promise<boolean>((resolve) => {
-      confirmResolverRef.current?.(false);
+  const confirmActionWithCheckbox = useCallback((message: string, options?: Omit<ConfirmRequest, "message">) => {
+    return new Promise<ConfirmResult>((resolve) => {
+      confirmResolverRef.current?.({ confirmed: false, checked: false });
       confirmResolverRef.current = resolve;
       setConfirmRequest({ message, ...options });
     });
   }, []);
 
-  const resolveConfirm = useCallback((value: boolean) => {
+  const confirmAction = useCallback(
+    (message: string, options?: Omit<ConfirmRequest, "message">) =>
+      confirmActionWithCheckbox(message, options).then((result) => result.confirmed),
+    [confirmActionWithCheckbox]
+  );
+
+  const resolveConfirm = useCallback((confirmed: boolean, checked = false) => {
     const resolver = confirmResolverRef.current;
     confirmResolverRef.current = null;
     setConfirmRequest(null);
-    resolver?.(value);
+    resolver?.({ confirmed, checked });
   }, []);
 
   useEffect(() => {
@@ -2178,7 +2190,40 @@ export default function App() {
     }
 
     if (action === "delete") {
-      runBranchTargetOperation("Delete branch", (repo) => deleteBranch(repo, target.name, false), `Delete branch '${target.name}'?`);
+      const repo = requireRepo();
+      if (!repo) return;
+      setBranchMenu(null);
+      const tracked = target.upstream ? splitRemoteRef(target.upstream, snapshot) : null;
+      const { confirmed, checked } = await confirmActionWithCheckbox(`Delete branch '${target.name}'?`, {
+        title: "Delete branch",
+        confirmLabel: "Delete branch",
+        checkboxLabel: tracked ? `Also delete '${tracked.branch}' from '${tracked.remote}'` : undefined
+      });
+      if (!confirmed) return;
+      const alsoRemote = checked && tracked ? tracked : null;
+      void runSnapshotOperation(alsoRemote ? "Delete branch and remote branch" : "Delete branch", async () => {
+        const local = await deleteBranch(repo, target.name, false);
+        // The local delete already succeeded; a remote failure surfaces on its own
+        // rather than rolling the local delete back.
+        if (!alsoRemote) return local;
+        return deleteRemoteBranch(repo, alsoRemote.remote, alsoRemote.branch);
+      });
+      return;
+    }
+
+    if (action === "delete-remote") {
+      const remoteRef = target.isRemote ? target.name : target.upstream;
+      const tracked = remoteRef ? splitRemoteRef(remoteRef, snapshot) : null;
+      if (!tracked) {
+        setBranchMenu(null);
+        setError("This branch does not track a remote branch.");
+        return;
+      }
+      runBranchTargetOperation(
+        "Delete remote branch",
+        (repo) => deleteRemoteBranch(repo, tracked.remote, tracked.branch),
+        `Delete branch '${tracked.branch}' from '${tracked.remote}'? This removes it for everyone on the remote.`
+      );
       return;
     }
 
@@ -3756,7 +3801,7 @@ export default function App() {
       {confirmRequest && (
         <ConfirmDialog
           request={confirmRequest}
-          onConfirm={() => resolveConfirm(true)}
+          onConfirm={(checked) => resolveConfirm(true, checked)}
           onCancel={() => resolveConfirm(false)}
         />
       )}
@@ -3894,9 +3939,10 @@ function ConfirmDialog({
   onCancel
 }: {
   request: ConfirmRequest;
-  onConfirm: () => void;
+  onConfirm: (checked: boolean) => void;
   onCancel: () => void;
 }) {
+  const [checked, setChecked] = useState(request.checkboxDefault ?? false);
   return (
     <div className="prompt-backdrop" onMouseDown={onCancel}>
       <div
@@ -3920,11 +3966,17 @@ function ConfirmDialog({
             </IconButton>
           </div>
           <p className="prompt-message">{request.message}</p>
+          {request.checkboxLabel ? (
+            <label className="confirm-option">
+              <input type="checkbox" checked={checked} onChange={(event) => setChecked(event.target.checked)} />
+              <span>{request.checkboxLabel}</span>
+            </label>
+          ) : null}
           <div className="prompt-actions">
             <Button type="button" variant="ghost" onClick={onCancel}>
               Cancel
             </Button>
-            <Button type="button" variant="danger" onClick={onConfirm} autoFocus>
+            <Button type="button" variant="danger" onClick={() => onConfirm(checked)} autoFocus>
               {request.confirmLabel ?? "OK"}
             </Button>
           </div>
@@ -7959,6 +8011,21 @@ function statusLabel(change: { status: FileStatus }) {
   return "M";
 }
 
+const PROTECTED_BRANCH_NAMES = ["main", "master", "develop", "dev", "release"];
+
+// Split a remote-qualified ref such as `origin/feature/foo` into its remote and
+// branch halves. Branch names may contain slashes, so match the known remote
+// names first and only fall back to splitting at the first separator.
+function splitRemoteRef(ref: string, snapshot: RepoSnapshot | null): { remote: string; branch: string } | null {
+  const match = (snapshot?.remotes ?? [])
+    .filter((remote) => ref.startsWith(`${remote.name}/`))
+    .sort((a, b) => b.name.length - a.name.length)[0];
+  if (match) return { remote: match.name, branch: ref.slice(match.name.length + 1) };
+  const separator = ref.indexOf("/");
+  if (separator <= 0 || separator === ref.length - 1) return null;
+  return { remote: ref.slice(0, separator), branch: ref.slice(separator + 1) };
+}
+
 function branchMenuItems(
   target: BranchMenuTarget,
   snapshot: RepoSnapshot | null,
@@ -7972,6 +8039,12 @@ function branchMenuItems(
   const canMerge = !target.isCurrent && !target.isTag && !target.isUnborn && !target.isCommitOnly;
   const canRebase = !target.isCurrent && !target.isTag && !target.isUnborn && !target.isCommitOnly;
   const canDelete = localBranch && !target.isCurrent && !target.isProtected;
+  // A remote branch target deletes itself; a local one deletes whatever it tracks.
+  // `isProtected` is derived from the short name, which for a remote branch is
+  // `origin/main` and so never matches — re-check the branch half explicitly.
+  const remoteRef = target.isTag || target.isCommitOnly ? undefined : target.isRemote ? target.name : target.upstream;
+  const remoteTarget = remoteRef ? splitRemoteRef(remoteRef, snapshot) : null;
+  const remoteProtected = remoteTarget ? PROTECTED_BRANCH_NAMES.includes(remoteTarget.branch) : false;
 
   return [
     {
@@ -8059,6 +8132,24 @@ function branchMenuItems(
           disabled: !canDelete,
           hint: target.isCurrent ? "current branch" : target.isProtected ? "protected branch" : !localBranch ? `not a local ${branchRef}` : undefined
         },
+    ...(target.isTag
+      ? []
+      : ([
+          {
+            type: "item",
+            action: "delete-remote",
+            label: remoteTarget ? `Delete ${remoteTarget.branch} from ${remoteTarget.remote}` : "Delete from remote",
+            danger: true,
+            disabled: !hasRemote || !remoteTarget || remoteProtected,
+            hint: !hasRemote
+              ? "add remote first"
+              : !remoteTarget
+                ? "no tracked remote branch"
+                : remoteProtected
+                  ? "protected branch"
+                  : undefined
+          }
+        ] satisfies BranchMenuItem[])),
     ...(options?.providerLinks
       ? ([
           { type: "separator", key: "provider" },

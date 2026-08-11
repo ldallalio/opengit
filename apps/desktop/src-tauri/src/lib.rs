@@ -1975,6 +1975,27 @@ async fn git_branch_delete(
 }
 
 #[tauri::command]
+async fn git_branch_delete_remote(
+    repo_path: String,
+    remote: Option<String>,
+    name: String,
+) -> CommandResult<RepoSnapshot> {
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&name, "branch name")?;
+    let remote_name = remote
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "origin".into());
+    validate_ref_arg(&remote_name, "remote name")?;
+
+    // Fully qualify the refspec so the remote cannot resolve `name` to a tag that
+    // happens to share the branch name.
+    let refspec = format!("refs/heads/{name}");
+    create_safety_snapshot(&repo, "before delete remote branch").await?;
+    run_git(Some(&repo), vec!["push".into(), remote_name, "--delete".into(), refspec]).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
 async fn git_branch_rename(
     repo_path: String,
     old_name: String,
@@ -7665,6 +7686,7 @@ pub fn run() {
             git_branch_checkout,
             git_branch_checkout_remote,
             git_branch_delete,
+            git_branch_delete_remote,
             git_branch_rename,
             git_branch_inspect,
             git_stack_list,

@@ -1002,6 +1002,9 @@ input[type="checkbox"] {
   width: 15px;
   height: 15px;
   margin: 0;
+  /* The generic `input` rule sets `padding: 0 9px`, which under border-box floors
+     the box at 20px wide and renders every checkbox as a rectangle. */
+  padding: 0;
   flex: none;
   border: 1px solid var(--border-strong);
   border-radius: 3px;
@@ -3820,7 +3823,9 @@ input[type="checkbox"]:focus-visible {
   color: var(--muted);
 }
 
-.prompt-dialog input {
+/* Text fields only — checkboxes keep the global `input[type="checkbox"]` styling,
+   which this rule would otherwise override on source order. */
+.prompt-dialog input:not([type="checkbox"]) {
   width: 100%;
   height: 34px;
   padding: 0 10px;
@@ -3830,9 +3835,21 @@ input[type="checkbox"]:focus-visible {
   font-size: 14px;
 }
 
-.prompt-dialog input:focus {
+.prompt-dialog input:not([type="checkbox"]):focus {
   outline: none;
   border-color: var(--accent);
+}
+
+/* Opt-in checkbox row. The checkbox itself inherits the global
+   `input[type="checkbox"]` styling; this only lays out the row. */
+.prompt-dialog .confirm-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--body);
+  cursor: pointer;
 }
 
 .prompt-actions {
