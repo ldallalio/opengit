@@ -760,7 +760,8 @@ textarea {
 .sidebar {
   display: grid;
   grid-template-rows:
-    minmax(220px, var(--sidebar-branches-height, 420px))
+    max-content
+    var(--sidebar-branches-track, minmax(220px, var(--sidebar-branches-height, 420px)))
     var(--sidebar-branches-resize-track, 6px)
     var(--sidebar-inspector-track, minmax(220px, var(--sidebar-inspector-height, 270px)))
     var(--sidebar-inspector-resize-track, 6px)
@@ -823,6 +824,7 @@ textarea {
 
 .sidebar:has(.sidebar-branches-panel.og-panel-collapsed) {
   --sidebar-branches-height: 32px;
+  --sidebar-branches-track: 32px;
   --sidebar-branches-resize-track: 0px;
 }
 
@@ -1002,6 +1004,9 @@ input[type="checkbox"] {
   width: 15px;
   height: 15px;
   margin: 0;
+  /* The generic `input` rule sets `padding: 0 9px`, which under border-box floors
+     the box at 20px wide and renders every checkbox as a rectangle. */
+  padding: 0;
   flex: none;
   border: 1px solid var(--border-strong);
   border-radius: 3px;
@@ -3820,7 +3825,9 @@ input[type="checkbox"]:focus-visible {
   color: var(--muted);
 }
 
-.prompt-dialog input {
+/* Text fields only — checkboxes keep the global `input[type="checkbox"]` styling,
+   which this rule would otherwise override on source order. */
+.prompt-dialog input:not([type="checkbox"]) {
   width: 100%;
   height: 34px;
   padding: 0 10px;
@@ -3830,9 +3837,21 @@ input[type="checkbox"]:focus-visible {
   font-size: 14px;
 }
 
-.prompt-dialog input:focus {
+.prompt-dialog input:not([type="checkbox"]):focus {
   outline: none;
   border-color: var(--accent);
+}
+
+/* Opt-in checkbox row. The checkbox itself inherits the global
+   `input[type="checkbox"]` styling; this only lays out the row. */
+.prompt-dialog .confirm-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--body);
+  cursor: pointer;
 }
 
 .prompt-actions {
@@ -4989,3 +5008,44 @@ input[type="checkbox"]:focus-visible {
   border-radius: 8px;
   background: var(--panel-inset, rgba(0, 0, 0, 0.15));
 }
+
+/* Registered worktrees remain visible alongside checkout-local navigation. */
+.worktree-section { border-bottom: 1px solid var(--border); padding: 10px; min-height: 44px; }
+.worktree-heading, .worktree-toolbar, .worktree-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.worktree-heading { justify-content: space-between; }
+.worktree-section button, .worktree-dialog select, .worktree-dialog input:not([type="checkbox"]) { border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: inherit; padding: 6px 9px; font: inherit; }
+.worktree-section button:disabled { opacity: .45; cursor: not-allowed; }
+.worktree-sidebar-list { max-height: 190px; overflow: auto; display: grid; gap: 4px; margin-top: 8px; }
+.worktree-sidebar-list button { text-align: left; overflow: hidden; }
+.worktree-sidebar-list strong, .worktree-sidebar-list small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worktree-sidebar-list button.active { border-color: var(--accent); }
+.worktree-dialog { width: min(1000px, 92vw); max-height: 88vh; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
+.worktree-dialog::backdrop { background: #0009; }
+.worktree-dialog header { display: flex; justify-content: space-between; gap: 20px; align-items: start; margin-bottom: 18px; }
+.worktree-dialog h2, .worktree-dialog h3 { margin: 0 0 8px; }
+.worktree-dialog p, .worktree-dialog small { color: var(--muted); }
+.worktree-dialog code { overflow-wrap: anywhere; white-space: pre-wrap; }
+.worktree-cards { display: grid; gap: 12px; margin-top: 16px; }
+.worktree-cards article { border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.worktree-cards h3 small { font-size: 11px; margin-left: 8px; }
+.worktree-form { display: grid; gap: 14px; max-width: 720px; }
+.worktree-form label { display: grid; gap: 6px; }
+.worktree-form label:has(input[type="checkbox"]) { display: flex; align-items: center; }
+.worktree-form pre { white-space: pre-wrap; }
+.worktree-error { color: var(--danger); padding: 12px 0; }
+
+.sidebar { overflow-y: auto; align-content: start; }
+.sidebar > :nth-child(1) { grid-row: 1; }
+.sidebar-branches-panel { grid-row: 2; }
+.sidebar-branches-resize { grid-row: 3; }
+.branch-inspector-panel { grid-row: 4; }
+.sidebar-inspector-resize { grid-row: 5; }
+.sidebar-workflows-panel { grid-row: 6; }
+.sidebar-tags-panel { grid-row: 7; }
+.sidebar-tags-resize { grid-row: 8; }
+.sidebar-remotes-panel { grid-row: 9; }
+.sidebar-remotes-resize { grid-row: 10; }
+.sidebar-stashes-panel { grid-row: 11; }
+.sidebar-stashes-resize { grid-row: 12; }
+.sidebar-pull-requests-panel { grid-row: 13; }
+.worktree-section { overflow: hidden; }

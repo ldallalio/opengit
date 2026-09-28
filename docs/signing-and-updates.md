@@ -1,53 +1,51 @@
 # Signing And Updates
 
-OpenGit has two separate signing concerns:
+OpenGit uses Tauri updater signatures to authenticate update bundles. Platform code signing and macOS notarization are separate checks; a valid updater signature does not establish that an installer is code-signed or notarized.
 
-1. Tauri updater signing verifies that an update bundle came from the OpenGit release process.
-2. Platform code signing verifies the app to macOS, Windows, and Linux package managers.
+## Tauri updater
 
-Updater signing is configured first. Platform signing still needs developer certificates before production installer distribution.
-
-## Tauri Updater
-
-The app is configured to check GitHub Releases for update metadata:
+The app checks GitHub Releases at:
 
 ```text
 https://github.com/ldallalio/opengit/releases/latest/download/latest.json
 ```
 
-The updater public key is committed in `apps/desktop/src-tauri/tauri.conf.json`. The private key must never be committed.
+The updater public key is committed in `apps/desktop/src-tauri/tauri.conf.json`. The private key must never be committed. The maintainer's documented local key location is `~/.opengit/opengit-updater.key`; verify its availability locally without exposing its contents.
 
-Local private key location on the maintainer machine:
-
-```text
-~/.opengit/opengit-updater.key
-```
-
-GitHub Actions uses these repository secrets when creating updater artifacts:
+Tagged release builds pass `src-tauri/tauri.release.conf.json`, which enables `createUpdaterArtifacts`. The workflow supplies:
 
 - `TAURI_SIGNING_PRIVATE_KEY`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 
-Normal contributor builds do not require the private key. The release workflow passes `src-tauri/tauri.release.conf.json` to enable updater artifact generation only for tagged releases.
+Normal contributor builds use the default config and do not require the updater private key. Release builds require working signing configuration; inspect generated signatures and updater metadata before claiming updater delivery is verified.
 
-## Release Flow
+## Current release flow
 
-1. Merge release-ready changes to `main`.
-2. Update versions in `package.json`, `apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml`, and `apps/desktop/src-tauri/tauri.conf.json`.
-3. Run `npm run check`.
-4. Create and push a signed or annotated `v*` tag.
-5. Let `.github/workflows/release.yml` create a draft prerelease.
-6. Download and test each generated artifact.
-7. Publish only after the release notes clearly describe signing status and alpha limitations.
+1. Prepare the intended release commit and update root/desktop package versions, npm lockfile, Rust package/lockfile and Tauri config together.
+2. Run `npm run check`, review the diff and complete the prepublication checks in [Release checklist](release-checklist.md).
+3. Push an annotated or signed `v*` tag pointing to that commit. The workflow triggers on any matching tag, regardless of its branch.
+4. GitHub Actions builds macOS arm64, macOS x64, Linux x64 and Windows x64. Both macOS jobs explicitly bundle `.app` and `.dmg`; Linux/Windows use the configured default bundle targets. Tauri uploads binaries, updater artifacts and metadata into a draft release with `prerelease: false`.
+5. The macOS jobs additionally notarize/staple DMG wrappers when Apple notarization credentials are configured, then replace those release assets.
+6. After every build job succeeds, the publish job automatically makes the release public, ensures it is not a prerelease, and marks it latest. **There is no manual draft approval step.** Finish checks that require withholding publication before pushing the tag.
+7. Verify the published asset set, `latest.json`, installer behavior and update from an earlier version. Record platform acceptance separately from a successful build.
 
-The current workflow builds macOS `.app` artifacts and updater archives. DMG packaging should be added after Apple Developer ID signing and notarization are configured.
+## macOS signing and notarization
 
-## Platform Signing Still Needed
+The workflow passes these optional repository secrets to Tauri:
 
-Before production installer distribution:
+- `APPLE_CERTIFICATE`
+- `APPLE_CERTIFICATE_PASSWORD`
+- `APPLE_SIGNING_IDENTITY`
+- `APPLE_ID`
+- `APPLE_PASSWORD`
+- `APPLE_TEAM_ID`
 
-- macOS needs an Apple Developer ID certificate and notarization credentials.
-- Windows needs a code-signing certificate or Azure Trusted Signing.
-- Linux packages should publish checksums and, where possible, package signatures.
+With the complete appropriate credentials, Tauri signs/notarizes the application. A separate workflow step submits each DMG with `xcrun notarytool`, staples it with `xcrun stapler`, and reuploads it using `gh release upload --clobber`.
 
-Do not enable automatic public installer publishing until platform signing and clean-machine installer tests are passing.
+When Apple credentials are absent, the workflow is designed to permit unsigned macOS builds; the DMG step explicitly skips when `APPLE_ID` is empty. Incomplete credentials can fail the build/notarization step. Verify actual signing and notarization output for each architecture before describing a release as signed or notarized.
+
+## Windows and Linux
+
+Windows binaries are currently unsigned at the platform level. The workflow does not configure a Windows certificate or Azure Trusted Signing; Tauri updater signatures do not remove Windows installer trust warnings.
+
+Linux builds use Ubuntu 22.04 and install the required WebKitGTK/AppIndicator dependencies. The workflow does not include a separate package-signing or checksum-generation step. Inspect the uploaded bundle types and publish any additional checksums/signatures through the intended release process.

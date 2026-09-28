@@ -3,7 +3,7 @@ import type { BranchInspection, CommitFile, ProviderRepoCatalog, RepoSnapshot } 
 export const demoSnapshot: RepoSnapshot = {
   repository: {
     id: "demo",
-    path: "/Users/logan/Code/opengit",
+    path: "/workspace/opengit",
     name: "opengit",
     provider: "github",
     remotes: [
@@ -201,12 +201,16 @@ export const demoSnapshot: RepoSnapshot = {
   ],
   worktrees: [
     {
-      path: "/Users/logan/Code/opengit",
+      path: "/workspace/opengit",
       branch: "main",
       head: "f5a84c5a962f9adf6cf3e6de1ef4b3f4ad30ec57",
       locked: false,
-      prunable: false
-    }
+      prunable: false,
+      isMain: true, isCurrent: true, availability: "available"
+    },
+    { path: "/workspace/opengit-feature", branch: "feature/worktree-ui", head: "abc12345", locked: true, lockReason: "Agent working", prunable: false, availability: "available" },
+    { path: "/workspace/opengit-review", head: "def56789", detached: true, locked: false, prunable: false, availability: "available" },
+    { path: "/Volumes/External/opengit-experiment", branch: "experiment", head: "fed98765", locked: false, prunable: true, pruneReason: "Directory unavailable", availability: "missing" }
   ]
 };
 
@@ -305,7 +309,7 @@ export const demoProviderCatalog: ProviderRepoCatalog = {
       },
       localMatch: {
         status: "cloned",
-        path: "/Users/logandallalio/Documents/Hubley/hubley spfx",
+        path: "/workspace/sample-project",
         matchedRemote: "https://dev.azure.com/hubley/hubley%20spfx/_git/hubley%20spfx"
       }
     },

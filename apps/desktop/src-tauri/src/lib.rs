@@ -1,3 +1,4 @@
+mod worktrees;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
@@ -486,14 +487,13 @@ struct ConflictVersions {
     diff: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct Worktree {
-    path: String,
-    branch: Option<String>,
-    head: String,
-    locked: bool,
-    prunable: bool,
+    path: String, branch: Option<String>, head: String, locked: bool, prunable: bool,
+    branch_ref: Option<String>, lock_reason: Option<String>, prune_reason: Option<String>,
+    is_main: bool, is_current: bool, bare: bool, detached: bool,
+    common_dir: String, availability: String, checkout_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -975,6 +975,7 @@ async fn git_commit_page(repo_path: String, skip: u32, limit: Option<u32>) -> Co
 
 #[tauri::command]
 async fn git_stage(repo_path: String, paths: Vec<String>) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let safe_paths = validate_file_paths(&paths)?;
     let mut args = vec!["add".into(), "--".into()];
@@ -985,6 +986,7 @@ async fn git_stage(repo_path: String, paths: Vec<String>) -> CommandResult<RepoS
 
 #[tauri::command]
 async fn git_unstage(repo_path: String, paths: Vec<String>) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let safe_paths = validate_file_paths(&paths)?;
     let mut args = vec!["restore".into(), "--staged".into(), "--".into()];
@@ -995,6 +997,7 @@ async fn git_unstage(repo_path: String, paths: Vec<String>) -> CommandResult<Rep
 
 #[tauri::command]
 async fn git_discard(repo_path: String, paths: Vec<String>) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let safe_paths = validate_file_paths(&paths)?;
     create_safety_snapshot(&repo, "before discard").await?;
@@ -1036,6 +1039,7 @@ async fn git_commit(
     message: String,
     amend: bool,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     if message.trim().is_empty() {
         return invalid("INVALID_COMMIT_MESSAGE", "Commit message is required.");
@@ -1056,6 +1060,7 @@ async fn git_commit_message_update(
     commit_sha: String,
     message: String,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&commit_sha, "commit")?;
     if message.trim().is_empty() {
@@ -1068,6 +1073,7 @@ async fn git_commit_message_update(
 
 #[tauri::command]
 async fn git_commit_undo_last(repo_path: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     ensure_no_active_operation(&repo).await?;
     ensure_clean_worktree(&repo, "Undo last commit").await?;
@@ -1087,6 +1093,7 @@ async fn git_commit_undo_last(repo_path: String) -> CommandResult<RepoSnapshot> 
 
 #[tauri::command]
 async fn git_commit_squash_last(repo_path: String, message: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     if message.trim().is_empty() {
         return invalid("INVALID_COMMIT_MESSAGE", "Commit message is required.");
@@ -1835,6 +1842,7 @@ async fn ai_branch_explain(
 
 #[tauri::command]
 async fn git_branch_create(request: BranchCreateRequest) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&request.repo_path).await?;
     let repo = resolve_repo_root(&request.repo_path).await?;
     validate_ref_arg(&request.name, "branch name")?;
     let mut args = vec!["branch".into(), request.name.clone()];
@@ -1856,7 +1864,9 @@ async fn git_branch_create(request: BranchCreateRequest) -> CommandResult<RepoSn
 
 #[tauri::command]
 async fn git_branch_checkout(repo_path: String, name: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
+    worktrees::ensure_branch_available(&repo, &name).await?;
     validate_ref_arg(&name, "branch name")?;
     run_git_with_safety_snapshot(&repo, "before checkout", vec!["checkout".into(), name]).await?;
     build_snapshot(&repo, None).await
@@ -1889,6 +1899,7 @@ async fn git_branch_checkout_remote(
     repo_path: String,
     remote_ref: String,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&remote_ref, "remote branch")?;
 
@@ -1962,7 +1973,9 @@ async fn git_branch_delete(
     name: String,
     force: bool,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
+    worktrees::ensure_branch_available(&repo, &name).await?;
     validate_ref_arg(&name, "branch name")?;
     let delete_arg = if force { "-D" } else { "-d" };
     run_git_with_safety_snapshot(
@@ -1975,12 +1988,36 @@ async fn git_branch_delete(
 }
 
 #[tauri::command]
+async fn git_branch_delete_remote(
+    repo_path: String,
+    remote: Option<String>,
+    name: String,
+) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
+    let repo = resolve_repo_root(&repo_path).await?;
+    validate_ref_arg(&name, "branch name")?;
+    let remote_name = remote
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "origin".into());
+    validate_ref_arg(&remote_name, "remote name")?;
+
+    // Fully qualify the refspec so the remote cannot resolve `name` to a tag that
+    // happens to share the branch name.
+    let refspec = format!("refs/heads/{name}");
+    create_safety_snapshot(&repo, "before delete remote branch").await?;
+    run_git(Some(&repo), vec!["push".into(), remote_name, "--delete".into(), refspec]).await?;
+    build_snapshot(&repo, None).await
+}
+
+#[tauri::command]
 async fn git_branch_rename(
     repo_path: String,
     old_name: String,
     new_name: String,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
+    worktrees::ensure_branch_available(&repo, &old_name).await?;
     validate_ref_arg(&old_name, "branch name")?;
     validate_ref_arg(&new_name, "new branch name")?;
     run_git_with_safety_snapshot(
@@ -2038,6 +2075,7 @@ async fn git_stack_list(repo_path: String) -> CommandResult<Vec<BranchStack>> {
 
 #[tauri::command]
 async fn git_stack_create(request: StackCreateRequest) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&request.repo_path).await?;
     let repo = resolve_repo_root(&request.repo_path).await?;
     validate_ref_arg(&request.trunk, "stack trunk")?;
     if !git_ref_exists(&repo, &request.trunk).await {
@@ -2084,6 +2122,7 @@ async fn git_stack_create(request: StackCreateRequest) -> CommandResult<RepoSnap
 
 #[tauri::command]
 async fn git_stack_create_child(request: StackCreateChildRequest) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&request.repo_path).await?;
     let repo = resolve_repo_root(&request.repo_path).await?;
     let stack_id = validate_metadata_id(&request.stack_id, "stack id")?;
     validate_ref_arg(&request.base_branch, "base branch")?;
@@ -2128,6 +2167,7 @@ async fn git_stack_create_child(request: StackCreateChildRequest) -> CommandResu
 
 #[tauri::command]
 async fn git_stack_add_branch(request: StackAddBranchRequest) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&request.repo_path).await?;
     let repo = resolve_repo_root(&request.repo_path).await?;
     let stack_id = validate_metadata_id(&request.stack_id, "stack id")?;
     validate_ref_arg(&request.branch, "stack branch")?;
@@ -2163,6 +2203,7 @@ async fn git_stack_add_branch(request: StackAddBranchRequest) -> CommandResult<R
 
 #[tauri::command]
 async fn git_stack_reorder(request: StackReorderRequest) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&request.repo_path).await?;
     let repo = resolve_repo_root(&request.repo_path).await?;
     let stack_id = validate_metadata_id(&request.stack_id, "stack id")?;
     let mut stacks = read_branch_stacks(&repo).await?;
@@ -2188,6 +2229,7 @@ async fn git_stack_remove_branch(
     stack_id: String,
     branch: String,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let stack_id = validate_metadata_id(&stack_id, "stack id")?;
     validate_ref_arg(&branch, "stack branch")?;
@@ -2202,11 +2244,13 @@ async fn git_stack_remove_branch(
 
 #[tauri::command]
 async fn git_stack_restack(repo_path: String, stack_id: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let stack_id = validate_metadata_id(&stack_id, "stack id")?;
     ensure_clean_worktree(&repo, "Restack").await?;
     let mut stacks = read_branch_stacks(&repo).await?;
     let stack = find_stack_mut(&mut stacks, &stack_id)?.clone();
+    for item in &stack.items { worktrees::ensure_branch_available(&repo, &item.branch).await?; }
     let original_branch = current_branch_name(&repo).await;
     create_safety_snapshot(&repo, "before stack restack").await?;
 
@@ -2250,6 +2294,7 @@ async fn git_stack_restack(repo_path: String, stack_id: String) -> CommandResult
 
 #[tauri::command]
 async fn git_stack_sync_trunk(repo_path: String, stack_id: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let stack_id = validate_metadata_id(&stack_id, "stack id")?;
     ensure_clean_worktree(&repo, "Sync trunk").await?;
@@ -2273,6 +2318,7 @@ async fn git_stack_sync_trunk(repo_path: String, stack_id: String) -> CommandRes
 
 #[tauri::command]
 async fn git_stack_push(repo_path: String, stack_id: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let stack_id = validate_metadata_id(&stack_id, "stack id")?;
     let mut stacks = read_branch_stacks(&repo).await?;
@@ -2314,6 +2360,7 @@ async fn git_lane_list(repo_path: String) -> CommandResult<Vec<ParallelLane>> {
 
 #[tauri::command]
 async fn git_lane_create(request: LaneCreateRequest) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&request.repo_path).await?;
     let repo = resolve_repo_root(&request.repo_path).await?;
     validate_ref_arg(&request.target_branch, "target branch")?;
     if !git_ref_exists(&repo, &request.target_branch).await {
@@ -2344,6 +2391,7 @@ async fn git_lane_create(request: LaneCreateRequest) -> CommandResult<RepoSnapsh
 
 #[tauri::command]
 async fn git_lane_assign_paths(request: LaneAssignPathsRequest) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&request.repo_path).await?;
     let repo = resolve_repo_root(&request.repo_path).await?;
     let lane_id = validate_metadata_id(&request.lane_id, "lane id")?;
     create_safety_snapshot(&repo, "before assign to parallel lane").await?;
@@ -2359,6 +2407,7 @@ async fn git_lane_assign_paths(request: LaneAssignPathsRequest) -> CommandResult
 
 #[tauri::command]
 async fn git_lane_apply(repo_path: String, lane_id: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let lane_id = validate_metadata_id(&lane_id, "lane id")?;
     create_safety_snapshot(&repo, "before parallel lane apply").await?;
@@ -2391,6 +2440,7 @@ async fn git_lane_apply(repo_path: String, lane_id: String) -> CommandResult<Rep
 
 #[tauri::command]
 async fn git_lane_unapply(repo_path: String, lane_id: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let lane_id = validate_metadata_id(&lane_id, "lane id")?;
     create_safety_snapshot(&repo, "before parallel lane unapply").await?;
@@ -2423,6 +2473,7 @@ async fn git_lane_unapply(repo_path: String, lane_id: String) -> CommandResult<R
 
 #[tauri::command]
 async fn git_lane_commit(request: LaneCommitRequest) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&request.repo_path).await?;
     let repo = resolve_repo_root(&request.repo_path).await?;
     if request.message.trim().is_empty() {
         return invalid("EMPTY_COMMIT_MESSAGE", "Commit message is required.");
@@ -2454,6 +2505,7 @@ async fn git_lane_commit(request: LaneCommitRequest) -> CommandResult<RepoSnapsh
 
 #[tauri::command]
 async fn git_lane_discard(repo_path: String, lane_id: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let lane_id = validate_metadata_id(&lane_id, "lane id")?;
     create_safety_snapshot(&repo, "before parallel lane discard").await?;
@@ -2475,6 +2527,7 @@ async fn git_lane_discard(repo_path: String, lane_id: String) -> CommandResult<R
 
 #[tauri::command]
 async fn git_lane_materialize_branch(request: LaneMaterializeBranchRequest) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&request.repo_path).await?;
     let repo = resolve_repo_root(&request.repo_path).await?;
     validate_ref_arg(&request.branch_name, "branch name")?;
     let lane_id = validate_metadata_id(&request.lane_id, "lane id")?;
@@ -2503,6 +2556,7 @@ async fn git_lane_materialize_branch(request: LaneMaterializeBranchRequest) -> C
 
 #[tauri::command]
 async fn git_fetch(repo_path: String, remote: Option<String>) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let mut args = vec!["fetch".into()];
     if let Some(remote_name) = remote.filter(|value| !value.trim().is_empty()) {
@@ -2515,6 +2569,7 @@ async fn git_fetch(repo_path: String, remote: Option<String>) -> CommandResult<R
 
 #[tauri::command]
 async fn git_pull(repo_path: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     run_git_snapshot_operation(
         &repo,
@@ -2526,6 +2581,7 @@ async fn git_pull(repo_path: String) -> CommandResult<RepoSnapshot> {
 
 #[tauri::command]
 async fn git_pull_fast_forward(repo_path: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     run_git_snapshot_operation(
         &repo,
@@ -2537,6 +2593,7 @@ async fn git_pull_fast_forward(repo_path: String) -> CommandResult<RepoSnapshot>
 
 #[tauri::command]
 async fn git_pull_rebase(repo_path: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     run_git_snapshot_operation(
         &repo,
@@ -2548,6 +2605,7 @@ async fn git_pull_rebase(repo_path: String) -> CommandResult<RepoSnapshot> {
 
 #[tauri::command]
 async fn git_merge(repo_path: String, branch: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&branch, "branch name")?;
     run_git_snapshot_operation(
@@ -2560,6 +2618,7 @@ async fn git_merge(repo_path: String, branch: String) -> CommandResult<RepoSnaps
 
 #[tauri::command]
 async fn git_rebase(repo_path: String, upstream: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&upstream, "upstream branch")?;
     run_git_snapshot_operation(&repo, "before rebase", vec!["rebase".into(), upstream]).await
@@ -2567,6 +2626,7 @@ async fn git_rebase(repo_path: String, upstream: String) -> CommandResult<RepoSn
 
 #[tauri::command]
 async fn git_cherry_pick(repo_path: String, commit_sha: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&commit_sha, "commit")?;
     run_git_snapshot_operation(
@@ -2579,6 +2639,7 @@ async fn git_cherry_pick(repo_path: String, commit_sha: String) -> CommandResult
 
 #[tauri::command]
 async fn git_revert(repo_path: String, commit_sha: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&commit_sha, "commit")?;
     run_git_snapshot_operation(
@@ -2630,6 +2691,7 @@ async fn git_conflict_resolve(
     path: String,
     strategy: String,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let mut safe_paths = validate_file_paths(&[path])?;
     let path = safe_paths.remove(0);
@@ -2692,6 +2754,7 @@ async fn git_conflict_mark_resolved(
     repo_path: String,
     path: String,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let mut safe_paths = validate_file_paths(&[path])?;
     let path = safe_paths.remove(0);
@@ -2706,6 +2769,7 @@ async fn git_conflict_mark_resolved(
 
 #[tauri::command]
 async fn git_operation_continue(repo_path: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let result = match detect_git_operation(&repo).await {
         GitOperationState::Rebasing => {
@@ -2745,6 +2809,7 @@ async fn git_operation_continue(repo_path: String) -> CommandResult<RepoSnapshot
 
 #[tauri::command]
 async fn git_operation_abort(repo_path: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     match detect_git_operation(&repo).await {
         GitOperationState::Rebasing => {
@@ -2790,6 +2855,7 @@ async fn git_tag_create(
     target: String,
     message: Option<String>,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&name, "tag name")?;
     validate_ref_arg(&target, "tag target")?;
@@ -2813,6 +2879,7 @@ async fn git_push(
     force_with_lease: bool,
     set_upstream: bool,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let context = push_context(&repo, remote.as_deref(), branch.as_deref()).await;
     let mut args = vec!["push".into()];
@@ -2846,6 +2913,7 @@ async fn git_push_tag(
     remote: Option<String>,
     tag: String,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&tag, "tag name")?;
     let remote_name = remote
@@ -2862,6 +2930,7 @@ async fn git_push_tag(
 
 #[tauri::command]
 async fn git_tag_delete(repo_path: String, name: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&name, "tag name")?;
     run_git_with_safety_snapshot(&repo, "before tag delete", vec!["tag".into(), "-d".into(), name]).await?;
@@ -2874,6 +2943,7 @@ async fn git_tag_delete_remote(
     remote: Option<String>,
     name: String,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&name, "tag name")?;
     let remote_name = remote
@@ -2894,6 +2964,7 @@ async fn git_tag_annotate(
     target: String,
     message: String,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&name, "tag name")?;
     validate_ref_arg(&target, "tag target")?;
@@ -2922,6 +2993,7 @@ async fn git_remote_add(
     name: String,
     url: String,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_ref_arg(&name, "remote name")?;
     validate_remote_url(&url)?;
@@ -2936,6 +3008,7 @@ async fn git_remote_add(
 
 #[tauri::command]
 async fn git_stash_push(repo_path: String, message: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let mut args = vec!["stash".into(), "push".into()];
     if !message.trim().is_empty() {
@@ -2951,6 +3024,7 @@ async fn git_stash_push_paths(
     paths: Vec<String>,
     message: String,
 ) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let safe_paths = validate_file_paths(&paths)?;
     let mut args = vec!["stash".into(), "push".into(), "--include-untracked".into()];
@@ -2965,6 +3039,7 @@ async fn git_stash_push_paths(
 
 #[tauri::command]
 async fn git_ignore_add(repo_path: String, pattern: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let pattern = pattern.trim().to_string();
     if pattern.is_empty() {
@@ -3056,6 +3131,7 @@ async fn file_open_in_editor(repo_path: String, path: String) -> CommandResult<(
 
 #[tauri::command]
 async fn file_delete(repo_path: String, path: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let target = resolve_working_file(&repo, &path)?;
     if !target.exists() {
@@ -3092,6 +3168,7 @@ async fn git_export_patch(
 
 #[tauri::command]
 async fn git_stash_apply(repo_path: String, stash: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_stash_ref(&stash)?;
     run_git_with_safety_snapshot(
@@ -3105,6 +3182,7 @@ async fn git_stash_apply(repo_path: String, stash: String) -> CommandResult<Repo
 
 #[tauri::command]
 async fn git_stash_drop(repo_path: String, stash: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     validate_stash_ref(&stash)?;
     run_git_with_safety_snapshot(
@@ -3155,6 +3233,7 @@ async fn git_diff(
 /// 0 = inputs identical, 1 = inputs differ (the normal case here), >1 = real error.
 async fn run_git_no_index_diff(repo: &Path, args: Vec<String>) -> CommandResult<String> {
     let mut command = Command::new("git");
+    command.kill_on_drop(true);
     command.env("GIT_TERMINAL_PROMPT", "0");
     command.arg("-C").arg(repo);
     command.args(args);
@@ -3372,7 +3451,7 @@ async fn resolve_repo_root(path: &str) -> CommandResult<PathBuf> {
     )
     .await?;
 
-    let repo = PathBuf::from(root.trim());
+    let repo = PathBuf::from(root.strip_suffix('\n').unwrap_or(&root));
     let repo = std::fs::canonicalize(&repo).map_err(|error| AppError::InvalidInput {
         code: "INVALID_REPOSITORY",
         message: format!("Git returned an invalid repository root: {error}"),
@@ -3384,6 +3463,7 @@ async fn resolve_repo_root(path: &str) -> CommandResult<PathBuf> {
 async fn run_git(repo: Option<&Path>, args: Vec<String>) -> CommandResult<String> {
     let extra_headers = git_http_extra_headers(repo, &args).await?;
     let mut command = Command::new("git");
+    command.kill_on_drop(true);
     command.env("GIT_TERMINAL_PROMPT", "0");
     if !extra_headers.is_empty() {
         command.env("GIT_CONFIG_COUNT", extra_headers.len().to_string());
@@ -3423,6 +3503,7 @@ async fn run_git_with_env(
 ) -> CommandResult<String> {
     let extra_headers = git_http_extra_headers(repo, &args).await?;
     let mut command = Command::new("git");
+    command.kill_on_drop(true);
     command.env("GIT_TERMINAL_PROMPT", "0");
     for (key, value) in envs {
         command.env(key, value);
@@ -3487,6 +3568,7 @@ async fn run_git_snapshot_operation(
 
 #[tauri::command]
 async fn git_undo_restore(repo_path: String, snapshot_id: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let snapshot_id = validate_snapshot_id(&snapshot_id)?;
     if !matches!(detect_git_operation(&repo).await, GitOperationState::None) {
@@ -3763,51 +3845,7 @@ async fn clear_active_operation(repo: &Path) -> CommandResult<()> {
     Ok(())
 }
 
-async fn list_worktrees(repo: &Path) -> CommandResult<Vec<Worktree>> {
-    let output = run_git(
-        Some(repo),
-        vec!["worktree".into(), "list".into(), "--porcelain".into()],
-    )
-    .await
-    .unwrap_or_default();
-    let mut worktrees = Vec::new();
-    let mut path: Option<String> = None;
-    let mut head = String::new();
-    let mut branch: Option<String> = None;
-    let mut locked = false;
-    let mut prunable = false;
-
-    for line in output.lines().chain(std::iter::once("")) {
-        if line.is_empty() {
-            if let Some(path_value) = path.take() {
-                worktrees.push(Worktree {
-                    path: path_value,
-                    branch: branch.take().map(|value| normalize_ref_display(&value)),
-                    head: head.clone(),
-                    locked,
-                    prunable,
-                });
-            }
-            head.clear();
-            locked = false;
-            prunable = false;
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("worktree ") {
-            path = Some(value.to_string());
-        } else if let Some(value) = line.strip_prefix("HEAD ") {
-            head = value.to_string();
-        } else if let Some(value) = line.strip_prefix("branch ") {
-            branch = Some(value.to_string());
-        } else if line.starts_with("locked") {
-            locked = true;
-        } else if line.starts_with("prunable") {
-            prunable = true;
-        }
-    }
-
-    Ok(worktrees)
-}
+async fn list_worktrees(repo: &Path) -> CommandResult<Vec<Worktree>> { worktrees::list(repo).await }
 
 async fn enriched_branch_stacks(repo: &Path, branches: &[Branch]) -> Vec<BranchStack> {
     let Ok(stacks) = read_branch_stacks(repo).await else {
@@ -5447,6 +5485,7 @@ async fn git_dir_path(repo: &Path) -> Option<PathBuf> {
 /// delete a `*.lock` file that lives inside this repository's own Git directory.
 #[tauri::command]
 async fn git_clear_lock(repo_path: String, lock_path: String) -> CommandResult<RepoSnapshot> {
+    let _write_guard = worktrees::write_lock(&repo_path).await?;
     let repo = Path::new(&repo_path);
     let lock = PathBuf::from(&lock_path);
 
@@ -7619,6 +7658,15 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             repo_open,
+            worktrees::git_worktree_list,
+            worktrees::git_worktree_status,
+            worktrees::git_worktree_create,
+            worktrees::git_worktree_validate,
+            worktrees::git_worktree_remove_preview,
+            worktrees::git_worktree_remove,
+            worktrees::git_worktree_manage,
+            worktrees::git_worktree_prune_preview,
+            worktrees::git_worktree_prune,
             repo_clone,
             repo_status,
             git_identity_get,
@@ -7665,6 +7713,7 @@ pub fn run() {
             git_branch_checkout,
             git_branch_checkout_remote,
             git_branch_delete,
+            git_branch_delete_remote,
             git_branch_rename,
             git_branch_inspect,
             git_stack_list,

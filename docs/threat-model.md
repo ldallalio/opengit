@@ -61,3 +61,11 @@ Mitigations:
 - Run dependency audits before release.
 - Use signed Tauri updater artifacts.
 - Notarize macOS builds and code-sign Windows builds before public distribution.
+
+## Worktree lifecycle boundaries
+
+Worktree management accepts only freshly registered targets. Destinations must be absolute, absent, have an existing canonical parent, and avoid every registered checkout and repository administrative directory. Arguments are passed separately to Git; option terminators and explicit ref namespaces prevent path/ref text from becoming command options. Existing worktree branches cannot be renamed/deleted or rewritten through restack from another checkout.
+
+Removal is deliberately conservative: no force option, no directory-deletion fallback, no implicit branch deletion. Main/bare/locked/unavailable/dirty/conflicted/submodule/saved-lane checkouts are refused. Detached commits require a containing local branch or tag. Ignored content is separately acknowledged and the confirmation token changes with checkout identity/ref/HEAD or ignored file listing/metadata. This is a point-in-time safeguard, not a backup or a lock against external tools changing files between checks and Git execution.
+
+Stale-registration cleanup is repository-wide and requires an explicit preview with identical expiry policy and candidate recheck. Missing paths are not automatically pruned. A lock prevents lifecycle changes but does not prevent edits or prove that a checkout is idle. Reveal/editor commands resolve registered directories and launch explicit system commands without shell interpolation.
