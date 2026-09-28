@@ -32,6 +32,36 @@ async fn git(repo: &Path, args: &[&str]) -> CommandResult<String> {
     run_git(Some(repo), args.iter().map(|s| s.to_string()).collect()).await
 }
 
+/// Git for Windows accepts DOS/UNC worktree arguments, but `worktree add`
+/// interprets Rust's canonical verbatim prefix as a literal `//?/` directory.
+/// Keep canonical paths for identity/safety and convert only filesystem argv.
+fn git_path_argument(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if cfg!(windows) {
+        windows_git_path_argument(&path)
+    } else {
+        path.into_owned()
+    }
+}
+
+fn windows_git_path_argument(path: &str) -> String {
+    let slashes = path.replace('\\', "/");
+    if let Some(unc) = slashes.strip_prefix("//?/UNC/") {
+        return format!("//{unc}");
+    }
+    let dos = slashes.strip_prefix("//?/").unwrap_or(&slashes);
+    let bytes = dos.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/' {
+        return dos.to_string();
+    }
+    // Ordinary UNC paths need slash normalization too, but never reinterpret
+    // device namespaces or arbitrary branch/ref strings as filesystem paths.
+    if slashes.starts_with("//") && !slashes.starts_with("//?/") && !slashes.starts_with("//./") {
+        return slashes;
+    }
+    path.to_string()
+}
+
 pub(super) fn parse(output: &str) -> Vec<Worktree> {
     let mut rows = Vec::new();
     let mut row = Worktree::default();
@@ -355,6 +385,7 @@ pub(super) async fn git_worktree_create(
         ],
     )
     .await?;
+    let git_dest = git_path_argument(&dest);
     let dest = dest.to_string_lossy().into_owned();
     let remote_ref = format!(
         "refs/remotes/{}",
@@ -398,7 +429,7 @@ pub(super) async fn git_worktree_create(
         "detached" => args.push("--detach"),
         _ => return Err(invalid("Unknown creation mode.")),
     }
-    args.extend(["--", &dest]);
+    args.extend(["--", &git_dest]);
     let tracking = request.mode == "new" && args.contains(&"--track");
     args.push(if request.mode == "existing" {
         &request.branch
@@ -540,7 +571,8 @@ pub(super) async fn git_worktree_remove(
             "Open a surviving checkout before removing this one.",
         ));
     }
-    git(&repo, &["worktree", "remove", "--", &path]).await?;
+    let git_target = git_path_argument(Path::new(&path));
+    git(&repo, &["worktree", "remove", "--", &git_target]).await?;
     Ok(())
 }
 #[tauri::command]
@@ -553,6 +585,7 @@ pub(super) async fn git_worktree_manage(
     let _guard = write_lock(&repo_path).await?;
     let repo = resolve_repo_root(&repo_path).await?;
     let row = member(&repo, &path).await?;
+    let git_target = git_path_argument(Path::new(&path));
     match action.as_str() {
         "reveal" | "editor" if row.availability == "available" => {
             let target = fs::canonicalize(&path)?.to_string_lossy().into_owned();
@@ -582,12 +615,12 @@ pub(super) async fn git_worktree_manage(
         "lock" if !row.is_main && !row.bare => {
             git(
                 &repo,
-                &["worktree", "lock", "--reason", &value, "--", &path],
+                &["worktree", "lock", "--reason", &value, "--", &git_target],
             )
             .await?;
         }
         "unlock" if !row.is_main && !row.bare => {
-            git(&repo, &["worktree", "unlock", "--", &path]).await?;
+            git(&repo, &["worktree", "unlock", "--", &git_target]).await?;
         }
         "move" if !row.is_main && !row.bare && !row.locked => {
             if Path::new(&path).join(".gitmodules").exists()
@@ -600,7 +633,13 @@ pub(super) async fn git_worktree_manage(
             let dest = destination(&repo, &value).await?;
             git(
                 &repo,
-                &["worktree", "move", "--", &path, &dest.to_string_lossy()],
+                &[
+                    "worktree",
+                    "move",
+                    "--",
+                    &git_target,
+                    &git_path_argument(&dest),
+                ],
             )
             .await?;
         }
@@ -629,7 +668,7 @@ pub(super) async fn git_worktree_manage(
             }
             git(
                 &repo,
-                &["worktree", "repair", "--", &moved.to_string_lossy()],
+                &["worktree", "repair", "--", &git_path_argument(&moved)],
             )
             .await?;
         }
@@ -683,6 +722,48 @@ pub(super) async fn git_worktree_prune(repo_path: String, preview: String) -> Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_git_arguments_use_dos_and_unc_paths() {
+        assert_eq!(
+            windows_git_path_argument(r"\\?\C:\Users\runner\other 雪"),
+            "C:/Users/runner/other 雪"
+        );
+        assert_eq!(
+            windows_git_path_argument("//?/D:/repo/worktree"),
+            "D:/repo/worktree"
+        );
+        assert_eq!(
+            windows_git_path_argument(r"C:\repo\worktree"),
+            "C:/repo/worktree"
+        );
+        assert_eq!(
+            windows_git_path_argument(r"\\?\UNC\server\share\worktree"),
+            "//server/share/worktree"
+        );
+        assert_eq!(
+            windows_git_path_argument("//?/UNC/server/share/worktree"),
+            "//server/share/worktree"
+        );
+        assert_eq!(
+            windows_git_path_argument(r"\\server\share\worktree"),
+            "//server/share/worktree"
+        );
+    }
+    #[test]
+    fn path_conversion_preserves_non_path_text_and_device_namespaces() {
+        for value in [
+            "refs/heads/feature",
+            "origin/main",
+            "--detach",
+            "HEAD",
+            r"\\?\Volume{example}\folder",
+            r"\\.\device",
+        ] {
+            assert_eq!(windows_git_path_argument(value), value);
+        }
+        #[cfg(not(windows))]
+        assert_eq!(git_path_argument(Path::new(r"/tmp/a\b")), r"/tmp/a\b");
+    }
     #[test]
     fn nul_parser_preserves_paths_and_reasons() {
         let rows = parse("worktree /repo main\0HEAD abc\0branch refs/heads/main\0future value\0\0worktree /other\n\t雪\0HEAD def\0detached\0locked external agent\0prunable missing path\0\0");
@@ -917,7 +998,15 @@ mod integration_tests {
     #[tokio::test]
     async fn creation_modes_tracking_and_invalid_destinations() {
         let (fixture, repo) = fixture("creation");
-        command(Path::new(&repo), &["remote", "add", "origin", &repo]);
+        command(
+            Path::new(&repo),
+            &[
+                "remote",
+                "add",
+                "origin",
+                &git_path_argument(Path::new(&repo)),
+            ],
+        );
         command(Path::new(&repo), &["fetch", "origin"]);
         let other = fixture.0.join("tracking").to_string_lossy().into_owned();
         git_worktree_create(
