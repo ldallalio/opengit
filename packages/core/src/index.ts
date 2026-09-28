@@ -330,6 +330,16 @@ export interface Conflict {
 }
 
 export interface Worktree {
+  branchRef?: string;
+  lockReason?: string;
+  pruneReason?: string;
+  isMain?: boolean;
+  isCurrent?: boolean;
+  bare?: boolean;
+  detached?: boolean;
+  commonDir?: string;
+  checkoutId?: string;
+  availability?: "available" | "missing" | "inaccessible";
   path: string;
   branch?: string;
   head: string;

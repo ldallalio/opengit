@@ -12,7 +12,7 @@ OpenGit is not affiliated with, endorsed by, or derived from GitKraken or any ot
 
 ## Download
 
-- **[Official signed builds](https://opengit-site.vercel.app)** — macOS (signed & notarized), Windows, and Linux. Pay once ($15), updates are free forever.
+- **[Official builds](https://opengit-site.vercel.app)** — macOS, Windows, and Linux. See each release for signing status; Windows binaries are currently unsigned. Pay once ($15), updates are free forever.
 - **Build from source** — the code is MIT licensed and free for anyone; see [Development](#development) below. Linux builds are always free either way.
 - **[Latest GitHub release](https://github.com/ldallalio/opengit/releases/latest)** — raw installers if you'd rather not go through the site.
 
@@ -25,6 +25,7 @@ If you're building from source and want to chip in anyway: [donate](https://dona
 - Open repositories with a native folder picker.
 - Switch between recent repositories with top-level repo tabs.
 - View branches, remotes, stashes, worktree status, and commit history.
+- Discover and manage every registered worktree, with checkout-specific drafts and guarded lifecycle actions.
 - Render a capped linked commit graph across branches.
 - Filter history by commit type, author, and date order.
 - Stage, unstage, stage all, unstage all, and discard file changes.
@@ -36,6 +37,15 @@ If you're building from source and want to chip in anyway: [donate](https://dona
 - Store OpenAI API keys and Azure DevOps PATs in the operating system keychain.
 - Use Azure DevOps HTTPS remotes without embedding tokens in remote URLs.
 
+## Worktrees
+
+Open any checkout to see every registered worktree in the sidebar. **Manage** opens the searchable worktree manager; the command palette also includes **Manage Worktrees**. A branch checked out elsewhere opens its existing checkout, and branch/commit menus can create a worktree from the selected source.
+
+The manager supports new/existing branches and detached commits, folder selection, reveal/editor actions, locks, move, locate/repair, clean removal, and previewed stale-registration cleanup. Remote bases create tracking branches. Each checkout keeps its own commit draft, amend setting and view selections while open in the app. Closing a tab does not remove a checkout.
+
+Removal preserves the branch and refuses dirty, locked, main, conflicted, submodule, saved-lane and unreferenced detached checkouts. Ignored files require acknowledgement and the preview is rechecked before removal. Checkout-local undo history is removed with a checkout; it is not a complete backup. There is no force removal. Missing directories may be disconnected drives: locate/repair or lock them before considering repository-wide cleanup.
+
+
 ## Platforms
 
 OpenGit is designed for:
@@ -44,7 +54,9 @@ OpenGit is designed for:
 - Windows
 - Linux
 
-Current development and day-to-day verification happen primarily on macOS. CI builds and tests the source on macOS, Windows, and Linux where possible, but signed installers are not published yet.
+Current development and day-to-day verification happen primarily on macOS. CI checks the source on macOS, Windows, and Linux. Tagged releases build macOS arm64 and x64 (app and DMG), Windows x64, and Linux x64, with Tauri updater signatures. macOS code signing/notarization depends on the configured Apple credentials; Windows binaries are currently unsigned. Download current installers from [GitHub Releases](https://github.com/ldallalio/opengit/releases/latest), and check their release notes for verified signing and platform acceptance.
+
+The release workflow automatically publishes and marks a release latest after all four builds succeed. See the [release checklist](docs/release-checklist.md) and [signing/update guide](docs/signing-and-updates.md) before pushing a release tag.
 
 ## Screenshots
 
@@ -79,7 +91,7 @@ Build the local desktop bundle:
 npm run tauri:build
 ```
 
-On macOS, if you only need the `.app` bundle while code signing/notarization is still pending, use:
+On macOS, build only the local `.app` bundle without the DMG packaging step with:
 
 ```sh
 npm run tauri:build:mac-app

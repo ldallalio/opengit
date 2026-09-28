@@ -1,3 +1,5 @@
+import { reconcileCheckoutPaths } from "./worktreeState";
+import { Worktrees } from "./Worktrees";
 import {
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
@@ -798,6 +800,9 @@ export default function App() {
   const [commitFilesLoading, setCommitFilesLoading] = useState(false);
   const [commitDiffLoading, setCommitDiffLoading] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
+  const checkoutDrafts = useRef(new Map<string, { message: string; amend: boolean }>());
+  const operationGeneration = useRef(0);
+  const checkoutViews = useRef(new Map<string, { commitSha?: string; filePath?: string; fileStaged?: boolean; branchRef: string | null; worktree: boolean; diffMode: DiffMode; centerView: CenterView; stack: string | null; lane: string | null; parallel: boolean }>());
   const [selectedCommitMessage, setSelectedCommitMessage] = useState(snapshot?.commits[0]?.message ?? "");
   const [commitEditorOpen, setCommitEditorOpen] = useState(false);
   const [openAiConfigured, setOpenAiConfigured] = useState(() => loadStoredCredentialFlag(openAiConfiguredStorageKey));
@@ -869,6 +874,15 @@ export default function App() {
   const [selectedStackId, setSelectedStackId] = useState<string | null>(null);
   const [selectedLaneId, setSelectedLaneId] = useState<string | null>(snapshot?.parallelLanes[0]?.id ?? null);
   const [parallelMode, setParallelMode] = useState(false);
+  // Read live editor/view state when an asynchronous open finishes, not its start-time closure.
+  const liveCheckoutState = useRef({
+    draft: { message: commitMessage, amend },
+    view: { commitSha: selectedCommit?.sha, filePath: selectedFile?.path, fileStaged: selectedFile?.staged, branchRef: selectedBranchRef, worktree: worktreeSelected, diffMode, centerView, stack: selectedStackId, lane: selectedLaneId, parallel: parallelMode }
+  });
+  liveCheckoutState.current = {
+    draft: { message: commitMessage, amend },
+    view: { commitSha: selectedCommit?.sha, filePath: selectedFile?.path, fileStaged: selectedFile?.staged, branchRef: selectedBranchRef, worktree: worktreeSelected, diffMode, centerView, stack: selectedStackId, lane: selectedLaneId, parallel: parallelMode }
+  };
   const snapshotRef = useRef<RepoSnapshot | null>(snapshot);
   const historyLimitRef = useRef(historyLimit);
   const loadingRef = useRef(loading);
@@ -1346,6 +1360,15 @@ export default function App() {
   };
 
   const setSnapshotState = (next: RepoSnapshot) => {
+    const previousPath = snapshotRef.current?.repository.path;
+    const switchingCheckout = previousPath !== next.repository.path;
+    if (switchingCheckout) {
+      if (previousPath) checkoutViews.current.set(previousPath, liveCheckoutState.current.view);
+      if (previousPath) checkoutDrafts.current.set(previousPath, liveCheckoutState.current.draft);
+      const draft = checkoutDrafts.current.get(next.repository.path);
+      setCommitMessage(draft?.message ?? ""); setAmend(draft?.amend ?? false);
+      setSelectedCommitFile(null); setCommitFiles([]); setCommitDiff(""); setDiff("");
+    }
     snapshotRef.current = next;
     setSnapshot(next);
     setRepoPath(next.repository.path);
@@ -1362,6 +1385,16 @@ export default function App() {
     setDiffMode(next.commits.length > 0 ? "commit" : "working");
     setCenterView(hasActiveConflictState(next) ? "conflict" : "graph");
     setDiffExpanded(false);
+    if (switchingCheckout) {
+      const view = checkoutViews.current.get(next.repository.path);
+      const selected = view?.commitSha ? next.commits.find(item => item.sha === view.commitSha) : next.commits[0];
+      setSelectedCommit(selected ?? null); setSelectedCommitMessage(selected?.message ?? "");
+      setSelectedFile(next.changes.find(item => item.path === view?.filePath && item.staged === view?.fileStaged) ?? next.changes[0] ?? null);
+      setSelectedBranchRef(view?.branchRef && snapshotHasBranchRef(next, view.branchRef) ? view.branchRef : defaultBranchRef(next));
+      setWorktreeSelected(view?.worktree ?? false); setDiffMode(view?.diffMode ?? (next.commits.length ? "commit" : "working"));
+      setCenterView(hasActiveConflictState(next) ? "conflict" : view?.centerView === "conflict" ? "graph" : view?.centerView ?? "graph");
+      setSelectedStackId(view?.stack ?? null); setSelectedLaneId(view?.lane ?? null); setParallelMode(view?.parallel ?? false);
+    }
   };
 
   const applyAutoSnapshot = useCallback((next: RepoSnapshot) => {
@@ -1444,12 +1477,14 @@ export default function App() {
   }, [applyAutoSnapshot, runningInTauri, snapshot?.repository.path]);
 
   const runSnapshotOperation = async (label: string, operation: () => Promise<RepoSnapshot>) => {
+    const generation = ++operationGeneration.current;
     setLoading(true);
     setError(null);
     setPushRecovery(null);
     setLockRecovery(null);
     try {
       const next = await operation();
+      if (generation !== operationGeneration.current) return false;
       setSnapshotState(next);
       if (hasActiveConflictState(next)) {
         setOperationLog((log) => [`${label} stopped: resolve conflicts`, ...log].slice(0, 8));
@@ -1457,6 +1492,7 @@ export default function App() {
         setOperationLog((log) => [`${label} complete`, ...log].slice(0, 8));
       }
     } catch (operationError) {
+      if (generation !== operationGeneration.current) return false;
       const message = operationError instanceof Error ? operationError.message : String(operationError);
       const apiError = operationError instanceof OpenGitApiError ? operationError : null;
       if (apiError?.code === "GIT_LOCK_EXISTS") {
@@ -1490,7 +1526,7 @@ export default function App() {
       }
       return false;
     } finally {
-      setLoading(false);
+      if (generation === operationGeneration.current) setLoading(false);
     }
     return true;
   };
@@ -1511,6 +1547,13 @@ export default function App() {
       return;
     }
 
+    operationGeneration.current++;
+    if (snapshotRef.current) {
+      checkoutDrafts.current.set(snapshotRef.current.repository.path, liveCheckoutState.current.draft);
+      checkoutViews.current.set(snapshotRef.current.repository.path, liveCheckoutState.current.view);
+    }
+    snapshotRef.current = null;
+    setLoading(false);
     setSnapshot(null);
     setSelectedCommit(null);
     setSelectedBranchRef(null);
@@ -1848,6 +1891,8 @@ export default function App() {
   };
 
   const checkoutInspectedBranch = (inspection: BranchInspection) => {
+    const occupied = snapshot?.worktrees.find(row => row.branch === inspection.branch.name && row.path !== snapshot.repository.path);
+    if (occupied && inspection.kind === "local") { void openRepositoryPath(occupied.path); return; }
     if (inspection.kind === "remote") {
       runBranchTargetOperation("Checkout remote branch", (repo) => checkoutRemoteBranch(repo, inspection.branch.name));
       return;
@@ -1994,6 +2039,18 @@ export default function App() {
   };
 
   const handleBranchMenuAction = async (action: BranchMenuAction, target: BranchMenuTarget) => {
+    if (action === "create-worktree") {
+      setBranchMenu(null);
+      window.dispatchEvent(new CustomEvent("opengit:worktrees", { detail: { base: target.isCommitOnly ? target.commitSha : target.name } }));
+      return;
+    }
+    const occupiedWorktree = snapshot?.worktrees.find(row => row.branch === target.name && row.path !== snapshot.repository.path);
+    if (occupiedWorktree && !target.isRemote && !target.isTag && !target.isCommitOnly && ["checkout", "rename", "delete"].includes(action)) {
+      setBranchMenu(null);
+      if (action === "checkout") await openRepositoryPath(occupiedWorktree.path);
+      else setError(`This branch is checked out at ${occupiedWorktree.path}. Open that checkout before changing its branch.`);
+      return;
+    }
     const branchRecord = snapshot ? findBranchByName(snapshot, target.name) : undefined;
     const currentBranch = snapshot?.currentBranch ?? "current branch";
     const remote = snapshot?.remotes[0];
@@ -2613,14 +2670,17 @@ export default function App() {
       return;
     }
 
+    const generation = operationGeneration.current;
     setAiGeneratingCommit(true);
     setError(null);
     try {
       const suggestion = await generateAiCommitMessage(repo, openAiModel, aiProvider);
+      if (generation !== operationGeneration.current || snapshotRef.current?.repository.path !== repo) return;
       const nextMessage = [suggestion.summary, suggestion.description].filter((part) => part.trim()).join("\n\n");
       setCommitMessage(nextMessage);
       setOperationLog((log) => ["Generated commit message from staged files", ...log].slice(0, 8));
     } catch (operationError) {
+      if (generation !== operationGeneration.current || snapshotRef.current?.repository.path !== repo) return;
       const message = operationError instanceof Error ? operationError.message : String(operationError);
       setError(message);
       setOperationLog((log) => [`AI commit message failed: ${message}`, ...log].slice(0, 8));
@@ -2818,6 +2878,8 @@ export default function App() {
       void runSnapshotOperation("Checkout remote branch", () => checkoutRemoteBranch(repo, branch.name));
       return;
     }
+    const occupied = snapshot?.worktrees.find(row => row.branch === branch.name && row.path !== repo);
+    if (occupied) { void openRepositoryPath(occupied.path); return; }
     void runSnapshotOperation("Checkout branch", () => checkoutBranch(repo, branch.name));
   };
 
@@ -2887,14 +2949,17 @@ export default function App() {
   const clearLockAndRetry = async () => {
     if (!lockRecovery) return;
     const recovery = lockRecovery;
+    const generation = ++operationGeneration.current;
     setLockRecovery(null);
     setLoading(true);
     setError(null);
     try {
       const cleared = await clearRepoLock(recovery.repoPath, recovery.lockPath);
+      if (generation !== operationGeneration.current) return;
       setSnapshotState(cleared);
       setOperationLog((log) => ["Cleared Git lock", ...log].slice(0, 8));
     } catch (clearError) {
+      if (generation !== operationGeneration.current) return;
       const message = clearError instanceof Error ? clearError.message : String(clearError);
       setError(message);
       setOperationLog((log) => [`Clear lock failed: ${message}`, ...log].slice(0, 8));
@@ -2993,6 +3058,7 @@ export default function App() {
 
       <section className="workspace">
         <RepoTabStrip
+          worktreeLabels={Object.fromEntries((snapshot?.worktrees ?? []).map(row => [row.path, `${repoNameFromPath(row.path)} · ${row.branch || row.head.slice(0, 8)}`]))}
           tabs={visibleRepoTabs}
           activePath={activeRepoPath}
           loading={loading}
@@ -3190,6 +3256,13 @@ export default function App() {
           style={contentGridStyle}
         >
           <Sidebar
+            worktrees={snapshot ? <Worktrees snapshot={snapshot} open={openRepositoryPath} reconcile={(oldPath, newPath) => {
+              const draft = checkoutDrafts.current.get(oldPath); const view = checkoutViews.current.get(oldPath);
+              checkoutDrafts.current.delete(oldPath); checkoutViews.current.delete(oldPath);
+              if (newPath) { if (draft) checkoutDrafts.current.set(newPath, draft); if (view) checkoutViews.current.set(newPath, view); }
+              setRepoTabs(current => setRepoTabsState(reconcileCheckoutPaths(current, oldPath, newPath)));
+              setRecentRepos(current => { const next = reconcileCheckoutPaths(current, oldPath, newPath); localStorage.setItem("opengit:recentRepos", JSON.stringify(next)); return next; });
+            }} /> : null}
             snapshot={snapshot}
             sidebarBranchFilter={sidebarBranchFilter}
             stashMessage={stashMessage}
@@ -3709,6 +3782,7 @@ export default function App() {
             ["Open repository", openCurrentPath],
             ["Browse for repository", browseForRepository],
             ["Repository Management", openRepositoryManagement],
+            ["Manage Worktrees", () => window.dispatchEvent(new CustomEvent("opengit:worktrees"))],
             ["Preferences", () => setPreferencesOpen(true)],
             ["Refresh", refresh],
             ["Stage all changes", () => batchFileAction("Stage all", unstagedChanges, stagePaths)],
@@ -3987,6 +4061,7 @@ function ConfirmDialog({
 }
 
 function RepoTabStrip({
+  worktreeLabels,
   tabs,
   activePath,
   loading,
@@ -3997,6 +4072,7 @@ function RepoTabStrip({
   onOpenPalette,
   onOpenProfiles
 }: {
+  worktreeLabels: Record<string, string>;
   tabs: string[];
   activePath: string;
   loading: boolean;
@@ -4037,7 +4113,7 @@ function RepoTabStrip({
                 onClick={() => onOpen(path)}
               >
                 <GitBranch size={13} />
-                <span>{repoNameFromPath(path)}</span>
+                <span>{worktreeLabels[path] || repoNameFromPath(path)}</span>
               </button>
               <button className="repo-tab-close" type="button" aria-label={`Close ${repoNameFromPath(path)}`} onClick={() => onClose(path)}>
                 <X size={12} />
@@ -4412,6 +4488,7 @@ function CommitComposer({
 }
 
 function Sidebar({
+  worktrees,
   snapshot,
   sidebarBranchFilter,
   remoteName,
@@ -4463,6 +4540,7 @@ function Sidebar({
   discardSelectedLane,
   materializeSelectedLane
 }: {
+  worktrees: React.ReactNode;
   snapshot: RepoSnapshot | null;
   sidebarBranchFilter: string;
   remoteName: string;
@@ -4525,6 +4603,7 @@ function Sidebar({
 
   return (
     <aside className="sidebar">
+      {worktrees || <div />}
       <Panel
         title="Branches"
         className="sidebar-branches-panel"
@@ -8038,7 +8117,8 @@ function branchMenuItems(
   const canCheckout = target.isTag || target.isRemote || (localBranch && !target.isCurrent);
   const canMerge = !target.isCurrent && !target.isTag && !target.isUnborn && !target.isCommitOnly;
   const canRebase = !target.isCurrent && !target.isTag && !target.isUnborn && !target.isCommitOnly;
-  const canDelete = localBranch && !target.isCurrent && !target.isProtected;
+  const occupiedWorktree = snapshot?.worktrees.find(row => row.branch === target.name && row.path !== snapshot.repository.path);
+  const canDelete = localBranch && !target.isCurrent && !target.isProtected && !occupiedWorktree;
   // A remote branch target deletes itself; a local one deletes whatever it tracks.
   // `isProtected` is derived from the short name, which for a remote branch is
   // `origin/main` and so never matches — re-check the branch half explicitly.
@@ -8107,6 +8187,7 @@ function branchMenuItems(
     { type: "item", action: "stack-pr-plan", label: "Prepare stack PR chain", disabled: !(snapshot?.branchStacks.length ?? 0) },
     { type: "separator", key: "commit" },
     { type: "item", action: "create-branch", label: "Create branch here", disabled: target.isUnborn },
+    { type: "item", action: "create-worktree", label: "Create worktree from here", disabled: target.isUnborn },
     { type: "item", action: "cherry-pick", label: "Cherry pick commit", disabled: !target.commitSha },
     { type: "item", action: "revert", label: "Revert commit", disabled: !target.commitSha },
     { type: "separator", key: "manage" },
@@ -8114,7 +8195,7 @@ function branchMenuItems(
       type: "item",
       action: "rename",
       label: `Rename ${target.name}`,
-      disabled: !localBranch,
+      disabled: !localBranch || !!occupiedWorktree,
       hint: !localBranch ? `not a local ${branchRef}` : undefined
     },
     target.isTag

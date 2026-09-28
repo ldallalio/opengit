@@ -205,8 +205,12 @@ export const demoSnapshot: RepoSnapshot = {
       branch: "main",
       head: "f5a84c5a962f9adf6cf3e6de1ef4b3f4ad30ec57",
       locked: false,
-      prunable: false
-    }
+      prunable: false,
+      isMain: true, isCurrent: true, availability: "available"
+    },
+    { path: "/Users/logan/Code/opengit-feature", branch: "feature/worktree-ui", head: "abc12345", locked: true, lockReason: "Agent working", prunable: false, availability: "available" },
+    { path: "/Users/logan/Code/opengit-review", head: "def56789", detached: true, locked: false, prunable: false, availability: "available" },
+    { path: "/Volumes/External/opengit-experiment", branch: "experiment", head: "fed98765", locked: false, prunable: true, pruneReason: "Directory unavailable", availability: "missing" }
   ]
 };
 

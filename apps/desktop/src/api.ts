@@ -465,3 +465,20 @@ export const abortGitOperation = (repoPath: string) =>
 
 export const restoreUndoSnapshot = (repoPath: string, snapshotId: string) =>
   call<RepoSnapshot>("git_undo_restore", { repoPath, snapshotId }, demoSnapshot);
+
+export interface WorktreeStatus { staged: number; unstaged: number; untracked: number; ignored: number; conflicts: number; operation: boolean; checkedAt?: string }
+export interface WorktreeRemoval { path: string; head: string; token: string; ignored: number; blockers: string[] }
+export const listWorktrees = (repoPath: string) => call<import("@opengit/core").Worktree[]>("git_worktree_list", { repoPath }, demoSnapshot.worktrees);
+export const worktreeStatus = (repoPath: string, path: string) => call<WorktreeStatus>("git_worktree_status", { repoPath, path }, { staged: path === demoSnapshot.repository.path ? 2 : 0, unstaged: path.includes("feature") ? 1 : 0, untracked: path === demoSnapshot.repository.path ? 1 : 0, ignored: 0, conflicts: 0, operation: false });
+async function worktreeMutation<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  if (!isTauriRuntime()) throw new Error("Worktree management requires the desktop app.");
+  return call<T>(command, args, undefined as T);
+}
+export const createWorktree = (repoPath: string, request: { path: string; mode: string; branch: string; startPoint: string }) => worktreeMutation<string>("git_worktree_create", { repoPath, request });
+export const previewWorktreeRemoval = (repoPath: string, path: string) => call<WorktreeRemoval>("git_worktree_remove_preview", { repoPath, path }, { path, head: "", token: "", ignored: 0, blockers: ["Worktree management requires the desktop app."] });
+export const removeWorktree = (repoPath: string, path: string, head: string, token: string, acknowledgeIgnored: boolean) => worktreeMutation<void>("git_worktree_remove", { repoPath, path, head, token, acknowledgeIgnored });
+export const manageWorktree = (repoPath: string, path: string, action: "lock" | "unlock" | "move" | "repair" | "reveal" | "editor", value = "") => worktreeMutation<void>("git_worktree_manage", { repoPath, path, action, value });
+export const previewWorktreePrune = (repoPath: string) => call<string>("git_worktree_prune_preview", { repoPath }, "");
+export const pruneWorktrees = (repoPath: string, preview: string) => worktreeMutation<void>("git_worktree_prune", { repoPath, preview });
+
+export const validateWorktree = (repoPath: string, request: { path: string; mode: string; branch: string; startPoint: string }) => call<void>("git_worktree_validate", { repoPath, request }, undefined);

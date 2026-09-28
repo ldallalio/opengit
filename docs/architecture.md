@@ -52,3 +52,15 @@
 - `git_diff(repo_path, path, staged)`
 
 Every command returns a typed payload or a normalized backend error through Tauri's invoke boundary.
+
+## Worktree management
+
+`src-tauri/src/worktrees.rs` owns NUL-delimited porcelain discovery, status probes, native creation validation and lifecycle commands. Registry errors remain errors; the manager retains its last successful list with a stale warning. The common Git directory groups repository writes, while the checkout Git directory identifies per-checkout metadata. Existing stacks, lanes and undo snapshots remain in their original checkout-local location.
+
+All repository-scoped mutation IPCs and worktree lifecycle commands acquire the same mutex keyed by canonical common Git directory. This serializes OpenGit windows/sibling checkouts, but cannot lock external Git/editor processes. Git's native lifecycle refusal checks are retained, and no recursive deletion fallback is used.
+
+The `Worktrees` component loads rows immediately, probes at most two statuses concurrently with a 15-second native timeout, and refreshes every 15 seconds while visible and on focus. It does not fetch histories for sibling rows. Request generations reject late status results. App snapshot operations reject superseded success/error completions; live editor refs preserve edits typed during a slow switch. Draft/view caches follow moved paths; tabs/recents retain their string-array storage format. The manager stays mounted during current-checkout lifecycle transitions so errors remain visible.
+
+Creation uses separate non-mutating preflight validation and repeats validation under the write lock. Removal previews bind directory identity, branch, HEAD and ignored-file metadata; execution rechecks all blockers. Prune previews and execution use `--expire=now` with an exact preview comparison. Repair verifies that the located `.git` pointer belongs to the selected registration in the same common repository.
+
+Validation includes disposable real Git repositories for linked staging/commit/snapshot isolation, lifecycle guards, remote tracking, repair/prune changes, conflicts, saved lanes, shared serialization and paths with Unicode/tabs/newlines. Native startup and browser preview are separate checks; Windows/Linux native acceptance remains a release gate.
